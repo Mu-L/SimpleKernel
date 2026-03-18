@@ -9,17 +9,27 @@ ENABLE_LANGUAGE (CXX)
 ADD_SUBDIRECTORY (libc)
 ADD_SUBDIRECTORY (libcxx)
 ADD_SUBDIRECTORY (arch)
-ADD_SUBDIRECTORY (driver)
+ADD_SUBDIRECTORY (memory)
+ADD_SUBDIRECTORY (device)
 ADD_SUBDIRECTORY (task)
+ADD_SUBDIRECTORY (filesystem)
 
-ADD_EXECUTABLE (${PROJECT_NAME} main.cpp memory.cpp syscall.cpp)
+ADD_EXECUTABLE (${PROJECT_NAME} main.cpp io_buffer.cpp syscall.cpp)
 
 # 添加头文件
 TARGET_INCLUDE_DIRECTORIES (${PROJECT_NAME} PRIVATE ./ include)
 
 # 添加要链接的库
-TARGET_LINK_LIBRARIES (${PROJECT_NAME} PRIVATE kernel_link_libraries libc
-                                               libcxx arch driver task)
+TARGET_LINK_LIBRARIES (
+    ${PROJECT_NAME}
+    PRIVATE kernel_link_libraries
+            libc
+            libcxx
+            arch
+            memory
+            device
+            task
+            filesystem)
 
 SET_TARGET_PROPERTIES (${PROJECT_NAME} PROPERTIES OUTPUT_NAME
                                                   ${KERNEL_ELF_OUTPUT_NAME})

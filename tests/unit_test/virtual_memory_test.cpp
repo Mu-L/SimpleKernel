@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "basic_info.hpp"
 #include "test_environment_state.hpp"
 
 namespace {
@@ -72,8 +73,9 @@ extern "C" void aligned_free(void* ptr) {
 class VirtualMemoryTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    Singleton<BasicInfo>::GetInstance().physical_memory_addr = 0x80000000;
-    Singleton<BasicInfo>::GetInstance().physical_memory_size = 0x10000000;
+    BasicInfoSingleton::create();
+    BasicInfoSingleton::instance().physical_memory_addr = 0x80000000;
+    BasicInfoSingleton::instance().physical_memory_size = 0x10000000;
     MockAllocator::GetInstance().Reset();
 
     env_state_.InitializeCores(1);
@@ -84,6 +86,7 @@ class VirtualMemoryTest : public ::testing::Test {
   void TearDown() override {
     MockAllocator::GetInstance().Reset();
     env_state_.ClearCurrentThreadEnvironment();
+    BasicInfoSingleton::destroy();
   }
 
   test_env::TestEnvironmentState env_state_;
@@ -126,8 +129,8 @@ TEST_F(VirtualMemoryTest, UnmapPage) {
   void* phys_addr = reinterpret_cast<void*>(0x80001000);
 
   // 映射页面
-  vm.MapPage(page_dir, virt_addr, phys_addr,
-             cpu_io::virtual_memory::GetUserPagePermissions());
+  (void)vm.MapPage(page_dir, virt_addr, phys_addr,
+                   cpu_io::virtual_memory::GetUserPagePermissions());
 
   // 取消映射
   auto result = vm.UnmapPage(page_dir, virt_addr);
@@ -214,8 +217,8 @@ TEST_F(VirtualMemoryTest, RemapPage) {
   void* phys_addr2 = reinterpret_cast<void*>(0x80002000);
 
   // 第一次映射
-  vm.MapPage(page_dir, virt_addr, phys_addr1,
-             cpu_io::virtual_memory::GetUserPagePermissions());
+  (void)vm.MapPage(page_dir, virt_addr, phys_addr1,
+                   cpu_io::virtual_memory::GetUserPagePermissions());
 
   // 重新映射到不同的物理地址
   auto result = vm.MapPage(page_dir, virt_addr, phys_addr2,
@@ -245,8 +248,8 @@ TEST_F(VirtualMemoryTest, DestroyPageDirectoryWithoutFreePages) {
   for (size_t i = 0; i < kNumPages; ++i) {
     void* virt_addr = reinterpret_cast<void*>(0x10000 + i * kPageSize);
     void* phys_addr = reinterpret_cast<void*>(0x80000000 + i * kPageSize);
-    vm.MapPage(page_dir, virt_addr, phys_addr,
-               cpu_io::virtual_memory::GetUserPagePermissions());
+    (void)vm.MapPage(page_dir, virt_addr, phys_addr,
+                     cpu_io::virtual_memory::GetUserPagePermissions());
   }
 
   size_t allocated_before = MockAllocator::GetInstance().GetAllocatedCount();
@@ -275,8 +278,8 @@ TEST_F(VirtualMemoryTest, ClonePageDirectoryWithMappings) {
   for (size_t i = 0; i < kNumPages; ++i) {
     void* virt_addr = reinterpret_cast<void*>(0x10000 + i * kPageSize);
     void* phys_addr = reinterpret_cast<void*>(0x80000000 + i * kPageSize);
-    vm.MapPage(src_page_dir, virt_addr, phys_addr,
-               cpu_io::virtual_memory::GetUserPagePermissions());
+    (void)vm.MapPage(src_page_dir, virt_addr, phys_addr,
+                     cpu_io::virtual_memory::GetUserPagePermissions());
   }
 
   // 克隆页表（复制映射）
@@ -323,8 +326,8 @@ TEST_F(VirtualMemoryTest, ClonePageDirectoryWithoutMappings) {
   for (size_t i = 0; i < kNumPages; ++i) {
     void* virt_addr = reinterpret_cast<void*>(0x10000 + i * kPageSize);
     void* phys_addr = reinterpret_cast<void*>(0x80000000 + i * kPageSize);
-    vm.MapPage(src_page_dir, virt_addr, phys_addr,
-               cpu_io::virtual_memory::GetUserPagePermissions());
+    (void)vm.MapPage(src_page_dir, virt_addr, phys_addr,
+                     cpu_io::virtual_memory::GetUserPagePermissions());
   }
 
   // 克隆页表（不复制映射）
@@ -387,8 +390,8 @@ TEST_F(VirtualMemoryTest, MemoryLeakCheck) {
   for (size_t i = 0; i < 10; ++i) {
     void* virt_addr = reinterpret_cast<void*>(0x10000 + i * 0x1000);
     void* phys_addr = reinterpret_cast<void*>(0x80000000 + i * 0x1000);
-    vm.MapPage(page_dir1, virt_addr, phys_addr,
-               cpu_io::virtual_memory::GetUserPagePermissions());
+    (void)vm.MapPage(page_dir1, virt_addr, phys_addr,
+                     cpu_io::virtual_memory::GetUserPagePermissions());
   }
 
   // 克隆

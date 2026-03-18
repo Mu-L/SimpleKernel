@@ -7,18 +7,33 @@
 #include "arch.h"
 #include "basic_info.hpp"
 #include "interrupt.h"
+#include "kernel.h"
 #include "kernel_fdt.hpp"
-#include "singleton.hpp"
 #include "task_manager.hpp"
 
+using InterruptDelegate = InterruptBase::InterruptDelegate;
 namespace {
-uint64_t interval = 0;
-uint64_t timer_intid = 0;
+/// 定时器中断间隔
+uint64_t interval{0};
+/// 定时器中断号
+uint64_t timer_intid{0};
+
+/**
+ * @brief 定时器中断处理函数
+ * @param cause 中断号（未使用）
+ * @param context 中断上下文（未使用）
+ * @return 始终返回 0
+ */
+auto TimerHandler(uint64_t /*cause*/, cpu_io::TrapContext* /*context*/)
+    -> uint64_t {
+  cpu_io::CNTV_TVAL_EL0::Write(interval);
+  TaskManagerSingleton::instance().TickUpdate();
+  return 0;
+}
 }  // namespace
 
-void TimerInitSMP() {
-  Singleton<Interrupt>::GetInstance().PPI(timer_intid,
-                                          cpu_io::GetCurrentCoreId());
+auto TimerInitSMP() -> void {
+  InterruptSingleton::instance().Ppi(timer_intid, cpu_io::GetCurrentCoreId());
 
   cpu_io::CNTV_CTL_EL0::ENABLE::Clear();
   cpu_io::CNTV_CTL_EL0::IMASK::Set();
@@ -29,25 +44,20 @@ void TimerInitSMP() {
   cpu_io::CNTV_CTL_EL0::IMASK::Clear();
 }
 
-void TimerInit() {
+auto TimerInit() -> void {
   // 计算 interval
-  interval = Singleton<BasicInfo>::GetInstance().interval / SIMPLEKERNEL_TICK;
+  interval = BasicInfoSingleton::instance().interval / SIMPLEKERNEL_TICK;
 
   // 获取定时器中断号
-  timer_intid = Singleton<KernelFdt>::GetInstance()
+  timer_intid = KernelFdtSingleton::instance()
                     .GetAarch64Intid("arm,armv8-timer")
                     .value() +
-                Gic::kPPIBase;
+                Gic::kPpiBase;
 
-  Singleton<Interrupt>::GetInstance().RegisterInterruptFunc(
-      timer_intid, [](uint64_t, cpu_io::TrapContext*) -> uint64_t {
-        cpu_io::CNTV_TVAL_EL0::Write(interval);
-        Singleton<TaskManager>::GetInstance().TickUpdate();
-        return 0;
-      });
+  InterruptSingleton::instance().RegisterInterruptFunc(
+      timer_intid, InterruptDelegate::create<TimerHandler>());
 
-  Singleton<Interrupt>::GetInstance().PPI(timer_intid,
-                                          cpu_io::GetCurrentCoreId());
+  InterruptSingleton::instance().Ppi(timer_intid, cpu_io::GetCurrentCoreId());
 
   cpu_io::CNTV_CTL_EL0::ENABLE::Clear();
   cpu_io::CNTV_CTL_EL0::IMASK::Set();

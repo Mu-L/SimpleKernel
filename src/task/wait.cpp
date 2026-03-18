@@ -2,18 +2,20 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
+#include <cassert>
+
 #include "expected.hpp"
 #include "kernel_log.hpp"
 #include "resource_id.hpp"
-#include "sk_cassert"
 #include "task_manager.hpp"
+#include "task_messages.hpp"
 
-Expected<Pid> TaskManager::Wait(Pid pid, int* status, bool no_hang,
-                                bool untraced) {
+auto TaskManager::Wait(Pid pid, int* status, bool no_hang, bool untraced)
+    -> Expected<Pid> {
   auto* current = GetCurrentTask();
-  sk_assert_msg(current != nullptr, "Wait: No current task");
-  sk_assert_msg(current->status == TaskStatus::kRunning,
-                "Wait: current task status must be kRunning");
+  assert(current != nullptr && "Wait: No current task");
+  assert(current->GetStatus() == TaskStatus::kRunning &&
+         "Wait: current task status must be kRunning");
 
   while (true) {
     TaskControlBlock* target = nullptr;
@@ -24,7 +26,7 @@ Expected<Pid> TaskManager::Wait(Pid pid, int* status, bool no_hang,
       // 遍历任务表寻找符合条件的子进程
       for (auto& [task_pid, task] : task_table_) {
         // 检查是否是当前进程的子进程
-        bool is_child = (task->parent_pid == current->pid);
+        bool is_child = (task->aux->parent_pid == current->pid);
 
         // 检查 PID 匹配条件
         bool pid_match = false;
@@ -33,13 +35,13 @@ Expected<Pid> TaskManager::Wait(Pid pid, int* status, bool no_hang,
           pid_match = is_child;
         } else if (pid == 0) {
           // 等待同进程组的任意子进程
-          pid_match = is_child && (task->pgid == current->pgid);
+          pid_match = is_child && (task->aux->pgid == current->aux->pgid);
         } else if (pid > 0) {
           // 等待指定 PID 的子进程
           pid_match = is_child && (task->pid == pid);
         } else {
           // pid < -1: 等待进程组 ID 为 |pid| 的任意子进程
-          pid_match = is_child && (task->pgid == static_cast<Pid>(-pid));
+          pid_match = is_child && (task->aux->pgid == static_cast<Pid>(-pid));
         }
 
         if (!pid_match) {
@@ -47,14 +49,14 @@ Expected<Pid> TaskManager::Wait(Pid pid, int* status, bool no_hang,
         }
 
         // 检查任务状态
-        if (task->status == TaskStatus::kZombie ||
-            task->status == TaskStatus::kExited) {
-          target = task;
+        if (task->GetStatus() == TaskStatus::kZombie ||
+            task->GetStatus() == TaskStatus::kExited) {
+          target = task.get();
           break;
         }
 
         // untraced: 报告已停止的子进程
-        if (untraced && task->status == TaskStatus::kBlocked) {
+        if (untraced && task->GetStatus() == TaskStatus::kBlocked) {
           if (status) {
             // 表示停止状态
             *status = 0;
@@ -66,31 +68,29 @@ Expected<Pid> TaskManager::Wait(Pid pid, int* status, bool no_hang,
 
     // 找到了退出的子进程
     if (target) {
-      sk_assert_msg(target->status == TaskStatus::kZombie ||
-                        target->status == TaskStatus::kExited,
-                    "Wait: target task must be kZombie or kExited");
-      sk_assert_msg(target->parent_pid == current->pid,
-                    "Wait: target parent_pid must match current pid");
+      assert((target->GetStatus() == TaskStatus::kZombie ||
+              target->GetStatus() == TaskStatus::kExited) &&
+             "Wait: target task must be kZombie or kExited");
+      assert(target->aux->parent_pid == current->pid &&
+             "Wait: target parent_pid must match current pid");
 
       Pid result_pid = target->pid;
 
       // 返回退出状态
       if (status) {
-        *status = target->exit_code;
+        *status = target->aux->exit_code;
       }
 
       // 清理僵尸进程
       {
         LockGuard lock_guard(task_table_lock_);
         auto it = task_table_.find(target->pid);
-        sk_assert_msg(it != task_table_.end(),
-                      "Wait: target must exist in task_table");
+        assert(it != task_table_.end() &&
+               "Wait: target must exist in task_table");
         task_table_.erase(it->first);
       }
 
-      delete target;
-
-      klog::Debug("Wait: pid=%zu reaped child=%zu\n", current->pid, result_pid);
+      klog::Debug("Wait: pid={} reaped child={}", current->pid, result_pid);
       return result_pid;
     }
 
@@ -105,10 +105,9 @@ Expected<Pid> TaskManager::Wait(Pid pid, int* status, bool no_hang,
 
     Block(wait_resource_id);
 
-    klog::Debug("Wait: pid=%zu blocked on resource=%s, data=%zu\n",
-                current->pid, wait_resource_id.GetTypeName(),
-                wait_resource_id.GetData());
-
+    klog::Debug("Wait: pid={} blocked on resource={}, data={}", current->pid,
+                wait_resource_id.GetTypeName(),
+                static_cast<uint64_t>(wait_resource_id.GetData()));
     // 被唤醒后重新检查
   }
 }

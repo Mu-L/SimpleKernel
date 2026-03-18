@@ -14,41 +14,51 @@ ADD_EXECUTABLE (
     memory_test.cpp
     virtual_memory_test.cpp
     interrupt_test.cpp
-    sk_list_test.cpp
-    sk_queue_test.cpp
-    sk_vector_test.cpp
-    sk_priority_queue_test.cpp
-    sk_rb_tree_test.cpp
-    sk_set_test.cpp
-    sk_unordered_map_test.cpp
     fifo_scheduler_test.cpp
     rr_scheduler_test.cpp
     cfs_scheduler_test.cpp
+    idle_scheduler_test.cpp
     thread_group_system_test.cpp
     wait_system_test.cpp
     clone_system_test.cpp
     exit_system_test.cpp
+    ramfs_system_test.cpp
+    fatfs_system_test.cpp
     kernel_task_test.cpp
     user_task_test.cpp
-    ${CMAKE_SOURCE_DIR}/src/memory.cpp
-    ${CMAKE_SOURCE_DIR}/src/syscall.cpp)
+    ${CMAKE_SOURCE_DIR}/src/syscall.cpp
+    ${CMAKE_SOURCE_DIR}/src/io_buffer.cpp)
 
 TARGET_INCLUDE_DIRECTORIES (
     ${PROJECT_NAME}
     PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/include
             ${CMAKE_SOURCE_DIR}/src/arch/${CMAKE_SYSTEM_PROCESSOR})
 
-TARGET_LINK_LIBRARIES (${PROJECT_NAME} PRIVATE kernel_link_libraries libc
-                                               libcxx arch driver task)
+TARGET_LINK_LIBRARIES (
+    ${PROJECT_NAME}
+    PRIVATE kernel_link_libraries
+            libc
+            libcxx
+            arch
+            memory
+            device
+            task
+            filesystem)
 
 # qemu 参数设置
 LIST (APPEND ${PROJECT_NAME}_QEMU_BOOT_FLAGS
       "-D;${CMAKE_BINARY_DIR}/bin/${PROJECT_NAME}_qemu.log")
 # 目标平台参数
 IF(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-    LIST (APPEND ${PROJECT_NAME}_QEMU_BOOT_FLAGS -drive
-          file=fat:rw:${CMAKE_BINARY_DIR}/bin,format=raw,media=disk -bios
-          ${u-boot_BINARY_DIR}/u-boot.rom)
+    LIST (
+        APPEND
+        ${PROJECT_NAME}_QEMU_BOOT_FLAGS
+        -drive
+        file=fat:rw:${CMAKE_BINARY_DIR}/bin,format=raw,media=disk
+        -bios
+        ${u-boot_BINARY_DIR}/u-boot.rom
+        -device
+        isa-debug-exit,iobase=0xf4,iosize=0x04)
 ELSEIF(CMAKE_SYSTEM_PROCESSOR STREQUAL "riscv64")
     LIST (APPEND ${PROJECT_NAME}_QEMU_BOOT_FLAGS -bios
           ${u-boot_BINARY_DIR}/spl/u-boot-spl.bin -device

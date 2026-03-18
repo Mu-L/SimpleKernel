@@ -4,8 +4,9 @@
 
 #include "kernel_log.hpp"
 #include "task_manager.hpp"
+#include "task_messages.hpp"
 
-void TaskManager::TickUpdate() {
+auto TaskManager::TickUpdate() -> void {
   auto& cpu_sched = GetCurrentCpuSched();
 
   bool need_preempt = false;
@@ -30,17 +31,18 @@ void TaskManager::TickUpdate() {
 
       // 唤醒任务
       cpu_sched.sleeping_tasks.pop();
-      task->status = TaskStatus::kReady;
+      task->fsm.Receive(MsgWakeup{});
 
       // 将任务重新加入对应调度器的就绪队列
-      auto* scheduler = cpu_sched.schedulers[task->policy];
+      auto* scheduler =
+          cpu_sched.schedulers[static_cast<uint8_t>(task->policy)].get();
       if (scheduler) {
         scheduler->Enqueue(task);
       }
     }
 
     // 更新当前任务的统计信息
-    if (current && current->status == TaskStatus::kRunning) {
+    if (current && current->GetStatus() == TaskStatus::kRunning) {
       // 更新总运行时间
       current->sched_info.total_runtime++;
 
@@ -50,7 +52,8 @@ void TaskManager::TickUpdate() {
       }
 
       // 调用调度器的 OnTick，检查是否需要抢占
-      auto* scheduler = cpu_sched.schedulers[current->policy];
+      auto* scheduler =
+          cpu_sched.schedulers[static_cast<uint8_t>(current->policy)].get();
 
       if (scheduler) {
         // 调度器可能基于自己的策略决定是否抢占
@@ -64,8 +67,7 @@ void TaskManager::TickUpdate() {
     }
   }
 
-  // 如果需要抢占，触发调度
-  if (need_preempt) {
+  if (need_preempt && cpu_sched.scheduler_started) {
     Schedule();
   }
 }

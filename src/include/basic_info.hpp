@@ -2,15 +2,14 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#ifndef SIMPLEKERNEL_SRC_INCLUDE_BASIC_INFO_HPP_
-#define SIMPLEKERNEL_SRC_INCLUDE_BASIC_INFO_HPP_
+#pragma once
+
+#include <etl/singleton.h>
 
 #include <cstddef>
 #include <cstdint>
 
 #include "kernel_log.hpp"
-#include "singleton.hpp"
-#include "sk_iostream"
 
 // 引用链接脚本中的变量
 /// @see http://wiki.osdev.org/Using_Linker_Script_Values
@@ -23,29 +22,32 @@ extern "C" void* end[];
 /// 内核入口，在 boot.S 中定义
 extern "C" void _boot();
 
+/// @brief 内核基础信息（物理内存、内核地址、CPU 核数等）
 struct BasicInfo {
   /// physical_memory 地址
-  uint64_t physical_memory_addr;
+  uint64_t physical_memory_addr{0};
   /// physical_memory 大小
-  size_t physical_memory_size;
+  size_t physical_memory_size{0};
 
   /// kernel 地址
-  uint64_t kernel_addr;
+  uint64_t kernel_addr{0};
   /// kernel 大小
-  size_t kernel_size;
+  size_t kernel_size{0};
 
   /// elf 地址
-  uint64_t elf_addr;
+  uint64_t elf_addr{0};
 
   /// fdt 地址
-  uint64_t fdt_addr;
+  uint64_t fdt_addr{0};
 
   /// cpu 核数
-  size_t core_count;
+  size_t core_count{0};
 
   /// 时钟频率
-  size_t interval;
+  size_t interval{0};
 
+  /// @name 构造/析构函数
+  /// @{
   /**
    * 构造函数，在 arch_main.cpp 中定义
    * @param argc 同 _start
@@ -53,8 +55,6 @@ struct BasicInfo {
    */
   explicit BasicInfo(int argc, const char** argv);
 
-  /// @name 构造/析构函数
-  /// @{
   BasicInfo() = default;
   BasicInfo(const BasicInfo&) = default;
   BasicInfo(BasicInfo&&) = default;
@@ -62,19 +62,6 @@ struct BasicInfo {
   auto operator=(BasicInfo&&) -> BasicInfo& = default;
   ~BasicInfo() = default;
   /// @}
-
-  friend auto operator<<(sk_std::ostream& ostream, const BasicInfo& basic_info)
-      -> sk_std::ostream& {
-    klog::Info("physical_memory_addr: 0x%X, size 0x%X.\n",
-               basic_info.physical_memory_addr,
-               basic_info.physical_memory_size);
-    klog::Info("kernel_addr: 0x%X, size 0x%X.\n", basic_info.kernel_addr,
-               basic_info.kernel_size);
-    klog::Info("elf_addr: 0x%X\n", basic_info.elf_addr);
-    klog::Info("fdt_addr: 0x%X\n", basic_info.fdt_addr);
-    klog::Info("core_count: %d\n", basic_info.core_count);
-    return ostream;
-  }
 };
 
-#endif /* SIMPLEKERNEL_SRC_INCLUDE_BASIC_INFO_HPP_ */
+using BasicInfoSingleton = etl::singleton<BasicInfo>;

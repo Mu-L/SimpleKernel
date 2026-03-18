@@ -11,206 +11,437 @@
 #include "arch.h"
 #include "basic_info.hpp"
 #include "kernel.h"
-#include "sk_cstdio"
-#include "sk_cstring"
-#include "sk_libcxx.h"
+#include "kstd_cstdio"
+#include "kstd_cstring"
+#include "kstd_libcxx.h"
+#include "kstd_memory"
 #include "sk_stdlib.h"
 #include "syscall.hpp"
 #include "system_test.h"
 #include "task_control_block.hpp"
 #include "task_manager.hpp"
+#include "task_messages.hpp"
 
 namespace {
 
 std::atomic<int> g_exit_test_counter{0};
+std::atomic<int> g_tests_completed{0};
+std::atomic<int> g_tests_failed{0};
 
-/**
- * @brief 测试正常退出
- */
+// ---------------------------------------------------------------------------
+// test_exit_normal
+// 测试: 创建带工作函数的任务，让其运行完毕后，验证 TCB 状态字段的语义正确性。
+// 具体检查: 初始状态不是 kExited/kZombie，退出码字段可正确写入并读出。
+// ---------------------------------------------------------------------------
+
+void normal_work(void* arg) {
+  auto* flag = reinterpret_cast<std::atomic<int>*>(arg);
+  klog::Debug("normal_work: running");
+  (void)sys_sleep(30);
+  *flag = 1;
+  klog::Debug("normal_work: done, calling sys_exit(0)");
+  sys_exit(0);
+}
+
 void test_exit_normal(void* /*arg*/) {
-  klog::Info("=== Exit Normal Test ===\n");
+  klog::Info("=== Exit Normal Test ===");
 
-  // 创建一个任务并让它正常退出
+  bool passed = true;
+
+  // 1. 创建 TCB 并检查初始状态不是终止态
   auto* task = new TaskControlBlock("ExitNormal", 10, nullptr, nullptr);
   task->pid = 5000;
-  task->tgid = 5000;
-  task->parent_pid = 1;
+  task->aux->tgid = 5000;
+  task->aux->parent_pid = 1;
 
-  Singleton<TaskManager>::GetInstance().AddTask(task);
-
-  // 让任务运行一段时间
-  sys_sleep(50);
-
-  // 模拟任务退出
-  task->exit_code = 0;
-  task->status = TaskStatus::kZombie;
-
-  if (task->exit_code == 0 && task->status == TaskStatus::kZombie) {
-    klog::Info("Task exited with code %d and status kZombie\n",
-               task->exit_code);
-  } else {
-    klog::Err("Task exit failed\n");
+  if (task->GetStatus() == TaskStatus::kExited ||
+      task->GetStatus() == TaskStatus::kZombie) {
+    klog::Err("test_exit_normal: FAIL — fresh TCB already in terminal state");
+    passed = false;
   }
 
-  klog::Info("Exit Normal Test: PASSED\n");
+  // 2. exit_code 默认应为 0
+  if (task->aux->exit_code != 0) {
+    klog::Err("test_exit_normal: FAIL — default exit_code != 0 (got {})",
+              task->aux->exit_code);
+    passed = false;
+  }
+
+  // 3. 创建有实际工作函数的任务，等待其完成后通过 flag 验证执行路径
+  std::atomic<int> work_flag{0};
+  auto worker = kstd::make_unique<TaskControlBlock>(
+      "ExitNormalWorker", 10, normal_work, reinterpret_cast<void*>(&work_flag));
+  TaskManagerSingleton::instance().AddTask(std::move(worker));
+
+  // 等待 worker 运行完毕（最多 500ms）
+  int timeout = 10;
+  while (timeout > 0 && work_flag.load() == 0) {
+    (void)sys_sleep(50);
+    timeout--;
+  }
+
+  if (work_flag.load() != 1) {
+    klog::Err("test_exit_normal: FAIL — worker did not complete");
+    passed = false;
+  } else {
+    klog::Info("test_exit_normal: worker completed successfully");
+  }
+
+  // 4. 向 task 写入退出信息并验证读回一致
+  task->aux->exit_code = 0;
+  task->fsm.Receive(MsgSchedule{});     // kUnInit -> kReady
+  task->fsm.Receive(MsgSchedule{});     // kReady -> kRunning
+  task->fsm.Receive(MsgExit{0, true});  // kRunning -> kZombie
+  if (task->aux->exit_code != 0 || task->GetStatus() != TaskStatus::kZombie) {
+    klog::Err("test_exit_normal: FAIL — TCB field write-back mismatch");
+    passed = false;
+  }
+
+  if (passed) {
+    klog::Info("Exit Normal Test: PASSED");
+  } else {
+    klog::Err("Exit Normal Test: FAILED");
+    g_tests_failed++;
+  }
+
+  delete task;
+  g_tests_completed++;
+  sys_exit(passed ? 0 : 1);
 }
 
-/**
- * @brief 测试带错误码退出
- */
-void test_exit_with_error(void* /*arg*/) {
-  klog::Info("=== Exit With Error Test ===\n");
+// ---------------------------------------------------------------------------
+// test_exit_with_error
+// 测试: 验证非零退出码可被正确存储和读回；字段语义与正常退出对称。
+// ---------------------------------------------------------------------------
 
+void error_work(void* arg) {
+  auto* flag = reinterpret_cast<std::atomic<int>*>(arg);
+  klog::Debug("error_work: running");
+  (void)sys_sleep(30);
+  *flag = 42;
+  klog::Debug("error_work: done, calling sys_exit(42)");
+  sys_exit(42);
+}
+
+void test_exit_with_error(void* /*arg*/) {
+  klog::Info("=== Exit With Error Test ===");
+
+  bool passed = true;
+
+  // 1. 创建 TCB，确认 exit_code 默认为 0
   auto* task = new TaskControlBlock("ExitError", 10, nullptr, nullptr);
   task->pid = 5001;
-  task->tgid = 5001;
-  task->parent_pid = 1;
+  task->aux->tgid = 5001;
+  task->aux->parent_pid = 1;
 
-  Singleton<TaskManager>::GetInstance().AddTask(task);
-
-  sys_sleep(50);
-
-  // 模拟任务以错误码退出
-  task->exit_code = 42;
-  task->status = TaskStatus::kZombie;
-
-  if (task->exit_code == 42 && task->status == TaskStatus::kZombie) {
-    klog::Info("Task exited with error code %d\n", task->exit_code);
-  } else {
-    klog::Err("Task exit with error failed\n");
+  if (task->aux->exit_code != 0) {
+    klog::Err("test_exit_with_error: FAIL — default exit_code != 0 (got {})",
+              task->aux->exit_code);
+    passed = false;
   }
 
-  klog::Info("Exit With Error Test: PASSED\n");
+  // 2. 创建带实际工作的任务，以错误码退出
+  std::atomic<int> work_flag{0};
+  auto worker = kstd::make_unique<TaskControlBlock>(
+      "ExitErrorWorker", 10, error_work, reinterpret_cast<void*>(&work_flag));
+  TaskManagerSingleton::instance().AddTask(std::move(worker));
+
+  int timeout = 10;
+  while (timeout > 0 && work_flag.load() == 0) {
+    (void)sys_sleep(50);
+    timeout--;
+  }
+
+  if (work_flag.load() != 42) {
+    klog::Err("test_exit_with_error: FAIL — worker did not set error flag");
+    passed = false;
+  } else {
+    klog::Info("test_exit_with_error: worker set flag to {}", work_flag.load());
+  }
+
+  // 3. 验证 TCB 中的退出码字段可以正确存储非零值
+  task->aux->exit_code = 42;
+  task->fsm.Receive(MsgSchedule{});      // kUnInit -> kReady
+  task->fsm.Receive(MsgSchedule{});      // kReady -> kRunning
+  task->fsm.Receive(MsgExit{42, true});  // kRunning -> kZombie
+  if (task->aux->exit_code != 42) {
+    klog::Err(
+        "test_exit_with_error: FAIL — exit_code write-back mismatch "
+        "(expected 42, got {})",
+        task->aux->exit_code);
+    passed = false;
+  }
+  if (task->GetStatus() != TaskStatus::kZombie) {
+    klog::Err("test_exit_with_error: FAIL — status write-back mismatch");
+    passed = false;
+  }
+
+  if (passed) {
+    klog::Info("Exit With Error Test: PASSED");
+  } else {
+    klog::Err("Exit With Error Test: FAILED");
+    g_tests_failed++;
+  }
+
+  delete task;
+  g_tests_completed++;
+  sys_exit(passed ? 0 : 1);
 }
 
-/**
- * @brief 测试线程退出
- */
+// ---------------------------------------------------------------------------
+// test_thread_exit (ALREADY GOOD — kept with counter increment added)
+// ---------------------------------------------------------------------------
+
 void child_thread_exit_work(void* arg) {
   uint64_t thread_id = reinterpret_cast<uint64_t>(arg);
 
-  klog::Info("Thread %zu: starting\n", thread_id);
+  klog::Info("Thread {}: starting", thread_id);
 
   for (int i = 0; i < 3; ++i) {
     g_exit_test_counter++;
-    klog::Debug("Thread %zu: working, iter=%d\n", thread_id, i);
-    sys_sleep(30);
+    klog::Debug("Thread {}: working, iter={}", thread_id, i);
+    (void)sys_sleep(30);
   }
 
-  klog::Info("Thread %zu: exiting\n", thread_id);
+  klog::Info("Thread {}: exiting", thread_id);
   sys_exit(static_cast<int>(thread_id));
 }
 
 void test_thread_exit(void* /*arg*/) {
-  klog::Info("=== Thread Exit Test ===\n");
+  klog::Info("=== Thread Exit Test ===");
 
   g_exit_test_counter = 0;
 
   // 创建线程组主线程
-  auto* leader = new TaskControlBlock("ThreadLeader", 10, nullptr, nullptr);
-  leader->pid = 5100;
-  leader->tgid = 5100;
-  leader->parent_pid = 1;
+  auto leader_uptr =
+      kstd::make_unique<TaskControlBlock>("ThreadLeader", 10, nullptr, nullptr);
+  leader_uptr->pid = 5100;
+  leader_uptr->aux->tgid = 5100;
+  leader_uptr->aux->parent_pid = 1;
+  auto* leader = leader_uptr.get();
 
-  Singleton<TaskManager>::GetInstance().AddTask(leader);
+  TaskManagerSingleton::instance().AddTask(std::move(leader_uptr));
 
   // 创建子线程
-  auto* thread1 = new TaskControlBlock("Thread1", 10, child_thread_exit_work,
-                                       reinterpret_cast<void*>(1));
+  auto thread1 = kstd::make_unique<TaskControlBlock>(
+      "Thread1", 10, child_thread_exit_work, reinterpret_cast<void*>(1));
   thread1->pid = 5101;
-  thread1->tgid = 5100;
+  thread1->aux->tgid = 5100;
   thread1->JoinThreadGroup(leader);
 
-  Singleton<TaskManager>::GetInstance().AddTask(thread1);
+  TaskManagerSingleton::instance().AddTask(std::move(thread1));
 
-  auto* thread2 = new TaskControlBlock("Thread2", 10, child_thread_exit_work,
-                                       reinterpret_cast<void*>(2));
+  auto thread2 = kstd::make_unique<TaskControlBlock>(
+      "Thread2", 10, child_thread_exit_work, reinterpret_cast<void*>(2));
   thread2->pid = 5102;
-  thread2->tgid = 5100;
+  thread2->aux->tgid = 5100;
   thread2->JoinThreadGroup(leader);
 
-  Singleton<TaskManager>::GetInstance().AddTask(thread2);
+  TaskManagerSingleton::instance().AddTask(std::move(thread2));
 
-  klog::Info("Created thread group with leader (pid=%zu) and 2 threads\n",
+  klog::Info("Created thread group with leader (pid={}) and 2 threads",
              leader->pid);
 
   // 等待线程运行并退出
-  sys_sleep(200);
+  (void)sys_sleep(200);
 
-  klog::Info("Exit test counter: %d (expected >= 6)\n",
+  klog::Info("Exit test counter: {} (expected >= 6)",
              g_exit_test_counter.load());
 
-  klog::Info("Thread Exit Test: PASSED\n");
+  bool passed = (g_exit_test_counter.load() >= 6);
+
+  if (passed) {
+    klog::Info("Thread Exit Test: PASSED");
+  } else {
+    klog::Err("Thread Exit Test: FAILED (counter={}, expected >= 6)",
+              g_exit_test_counter.load());
+    g_tests_failed++;
+  }
+
+  g_tests_completed++;
+  sys_exit(passed ? 0 : 1);
 }
 
-/**
- * @brief 测试孤儿进程退出
- */
-void test_orphan_exit(void* /*arg*/) {
-  klog::Info("=== Orphan Exit Test ===\n");
+// ---------------------------------------------------------------------------
+// test_orphan_exit
+// 测试: 孤儿进程 (parent_pid == 0) 的 TCB 字段语义：
+//   - parent_pid 正确存储 0
+//   - 无父进程时退出应进入 kExited 而非 kZombie
+// ---------------------------------------------------------------------------
 
-  // 创建一个孤儿进程（parent_pid = 0）
+void orphan_work(void* arg) {
+  auto* flag = reinterpret_cast<std::atomic<int>*>(arg);
+  klog::Debug("orphan_work: running");
+  (void)sys_sleep(30);
+  *flag = 1;
+  klog::Debug("orphan_work: done");
+  sys_exit(0);
+}
+
+void test_orphan_exit(void* /*arg*/) {
+  klog::Info("=== Orphan Exit Test ===");
+
+  bool passed = true;
+
+  // 1. 创建孤儿 TCB，验证 parent_pid == 0 被正确存储
   auto* orphan = new TaskControlBlock("Orphan", 10, nullptr, nullptr);
   orphan->pid = 5200;
-  orphan->tgid = 5200;
-  orphan->parent_pid = 0;  // 孤儿进程
+  orphan->aux->tgid = 5200;
+  orphan->aux->parent_pid = 0;  // 孤儿进程
 
-  Singleton<TaskManager>::GetInstance().AddTask(orphan);
-
-  sys_sleep(50);
-
-  // 孤儿进程退出时应该直接进入 kExited 状态
-  orphan->exit_code = 0;
-  orphan->status = TaskStatus::kExited;
-
-  if (orphan->parent_pid == 0 && orphan->status == TaskStatus::kExited) {
-    klog::Info("Orphan process exited with status kExited\n");
-  } else {
-    klog::Err("Orphan process exit failed\n");
+  if (orphan->aux->parent_pid != 0) {
+    klog::Err("test_orphan_exit: FAIL — parent_pid not stored as 0 (got {})",
+              orphan->aux->parent_pid);
+    passed = false;
   }
 
-  klog::Info("Orphan Exit Test: PASSED\n");
+  // 2. 孤儿进程退出时预期进入 kExited 而非 kZombie（无父进程等待回收）
+  orphan->aux->exit_code = 0;
+  orphan->fsm.Receive(MsgSchedule{});      // kUnInit -> kReady
+  orphan->fsm.Receive(MsgSchedule{});      // kReady -> kRunning
+  orphan->fsm.Receive(MsgExit{0, false});  // kRunning -> kExited (no parent)
+  if (orphan->GetStatus() != TaskStatus::kExited) {
+    klog::Err(
+        "test_orphan_exit: FAIL — orphan status should be kExited "
+        "(got {})",
+        static_cast<int>(orphan->GetStatus()));
+    passed = false;
+  }
+  if (orphan->aux->parent_pid != 0) {
+    klog::Err("test_orphan_exit: FAIL — parent_pid changed unexpectedly");
+    passed = false;
+  }
+
+  // 3. 用实际工作函数验证孤儿任务能正常执行和退出
+  std::atomic<int> work_flag{0};
+  auto orphan_worker = kstd::make_unique<TaskControlBlock>(
+      "OrphanWorker", 10, orphan_work, reinterpret_cast<void*>(&work_flag));
+  orphan_worker->aux->parent_pid = 0;  // 无父进程
+  TaskManagerSingleton::instance().AddTask(std::move(orphan_worker));
+
+  int timeout = 10;
+  while (timeout > 0 && work_flag.load() == 0) {
+    (void)sys_sleep(50);
+    timeout--;
+  }
+
+  if (work_flag.load() != 1) {
+    klog::Err("test_orphan_exit: FAIL — orphan worker did not complete");
+    passed = false;
+  } else {
+    klog::Info("test_orphan_exit: orphan worker completed");
+  }
+
+  if (passed) {
+    klog::Info("Orphan Exit Test: PASSED");
+  } else {
+    klog::Err("Orphan Exit Test: FAILED");
+    g_tests_failed++;
+  }
+
+  delete orphan;
+  g_tests_completed++;
+  sys_exit(passed ? 0 : 1);
 }
 
-/**
- * @brief 测试进程退出后变为僵尸
- */
+// ---------------------------------------------------------------------------
+// test_zombie_process
+// 测试: 子进程退出后变为僵尸状态——TCB 语义契约：
+//   - parent_pid 指向父进程
+//   - 退出后应是 kZombie（等父进程回收）而非 kExited
+// ---------------------------------------------------------------------------
+
+void child_work(void* arg) {
+  auto* flag = reinterpret_cast<std::atomic<int>*>(arg);
+  klog::Debug("child_work: running");
+  (void)sys_sleep(30);
+  *flag = 1;
+  klog::Debug("child_work: done");
+  sys_exit(0);
+}
+
 void test_zombie_process(void* /*arg*/) {
-  klog::Info("=== Zombie Process Test ===\n");
+  klog::Info("=== Zombie Process Test ===");
 
-  // 创建父进程
-  auto* parent = new TaskControlBlock("Parent", 10, nullptr, nullptr);
-  parent->pid = 5300;
-  parent->tgid = 5300;
-  parent->parent_pid = 1;
+  bool passed = true;
 
-  Singleton<TaskManager>::GetInstance().AddTask(parent);
+  // 1. 创建父子 TCB，验证 parent_pid 字段正确关联
+  auto parent_uptr =
+      kstd::make_unique<TaskControlBlock>("Parent", 10, nullptr, nullptr);
+  parent_uptr->pid = 5300;
+  parent_uptr->aux->tgid = 5300;
+  parent_uptr->aux->parent_pid = 1;
+  auto* parent = parent_uptr.get();
 
-  // 创建子进程
-  auto* child = new TaskControlBlock("Child", 10, nullptr, nullptr);
-  child->pid = 5301;
-  child->tgid = 5301;
-  child->parent_pid = parent->pid;
+  TaskManagerSingleton::instance().AddTask(std::move(parent_uptr));
 
-  Singleton<TaskManager>::GetInstance().AddTask(child);
+  auto* local_child =
+      new TaskControlBlock("ZombieFsmTest", 10, nullptr, nullptr);
+  local_child->pid = 5301;
+  local_child->aux->tgid = 5301;
+  local_child->aux->parent_pid = parent->pid;
 
-  sys_sleep(50);
-
-  // 子进程退出，应该变为僵尸状态等待父进程回收
-  child->exit_code = 0;
-  child->status = TaskStatus::kZombie;
-
-  if (child->parent_pid == parent->pid &&
-      child->status == TaskStatus::kZombie) {
-    klog::Info(
-        "Child process (pid=%zu) became zombie, waiting for parent to "
-        "reap\n",
-        child->pid);
-  } else {
-    klog::Err("Zombie process test failed\n");
+  if (local_child->aux->parent_pid != parent->pid) {
+    klog::Err(
+        "test_zombie_process: FAIL — child parent_pid mismatch "
+        "(expected {}, got {})",
+        parent->pid, local_child->aux->parent_pid);
+    passed = false;
   }
 
-  klog::Info("Zombie Process Test: PASSED\n");
+  local_child->aux->exit_code = 0;
+  local_child->fsm.Receive(MsgSchedule{});  // kUnInit -> kReady
+  local_child->fsm.Receive(MsgSchedule{});  // kReady -> kRunning
+  local_child->fsm.Receive(
+      MsgExit{0, true});  // kRunning -> kZombie (has parent)
+  if (local_child->GetStatus() != TaskStatus::kZombie) {
+    klog::Err(
+        "test_zombie_process: FAIL — child with living parent should be "
+        "kZombie (got {})",
+        static_cast<int>(local_child->GetStatus()));
+    passed = false;
+  }
+  if (local_child->aux->parent_pid != parent->pid) {
+    klog::Err(
+        "test_zombie_process: FAIL — child parent_pid changed after "
+        "status update");
+    passed = false;
+  }
+
+  klog::Info("Child process (pid={}) became zombie, waiting for parent to reap",
+             local_child->pid);
+
+  delete local_child;
+
+  // 3. 用真实工作函数验证有父进程的子任务能正常执行
+  std::atomic<int> work_flag{0};
+  auto real_child = kstd::make_unique<TaskControlBlock>(
+      "RealChild", 10, child_work, reinterpret_cast<void*>(&work_flag));
+  real_child->aux->parent_pid = 5300;  // 指向 parent
+  TaskManagerSingleton::instance().AddTask(std::move(real_child));
+
+  int timeout = 10;
+  while (timeout > 0 && work_flag.load() == 0) {
+    (void)sys_sleep(50);
+    timeout--;
+  }
+
+  if (work_flag.load() != 1) {
+    klog::Err("test_zombie_process: FAIL — child worker did not complete");
+    passed = false;
+  } else {
+    klog::Info("test_zombie_process: child worker completed");
+  }
+
+  if (passed) {
+    klog::Info("Zombie Process Test: PASSED");
+  } else {
+    klog::Err("Zombie Process Test: FAILED");
+    g_tests_failed++;
+  }
+
+  g_tests_completed++;
+  sys_exit(passed ? 0 : 1);
 }
 
 }  // namespace
@@ -219,35 +450,59 @@ void test_zombie_process(void* /*arg*/) {
  * @brief Exit 系统测试入口
  */
 auto exit_system_test() -> bool {
-  klog::Info("===== Exit System Test Start =====\n");
+  klog::Info("===== Exit System Test Start =====");
 
-  auto& task_mgr = Singleton<TaskManager>::GetInstance();
+  // 重置全局计数器
+  g_tests_completed = 0;
+  g_tests_failed = 0;
+  g_exit_test_counter = 0;
+
+  auto& task_mgr = TaskManagerSingleton::instance();
 
   // 测试 1: Normal exit
-  auto* test1 =
-      new TaskControlBlock("TestExitNormal", 10, test_exit_normal, nullptr);
-  task_mgr.AddTask(test1);
+  auto test1 = kstd::make_unique<TaskControlBlock>("TestExitNormal", 10,
+                                                   test_exit_normal, nullptr);
+  task_mgr.AddTask(std::move(test1));
 
   // 测试 2: Exit with error
-  auto* test2 = new TaskControlBlock("TestExitWithError", 10,
-                                     test_exit_with_error, nullptr);
-  task_mgr.AddTask(test2);
+  auto test2 = kstd::make_unique<TaskControlBlock>(
+      "TestExitWithError", 10, test_exit_with_error, nullptr);
+  task_mgr.AddTask(std::move(test2));
 
   // 测试 3: Thread exit
-  auto* test3 =
-      new TaskControlBlock("TestThreadExit", 10, test_thread_exit, nullptr);
-  task_mgr.AddTask(test3);
+  auto test3 = kstd::make_unique<TaskControlBlock>("TestThreadExit", 10,
+                                                   test_thread_exit, nullptr);
+  task_mgr.AddTask(std::move(test3));
 
   // 测试 4: Orphan exit
-  auto* test4 =
-      new TaskControlBlock("TestOrphanExit", 10, test_orphan_exit, nullptr);
-  task_mgr.AddTask(test4);
+  auto test4 = kstd::make_unique<TaskControlBlock>("TestOrphanExit", 10,
+                                                   test_orphan_exit, nullptr);
+  task_mgr.AddTask(std::move(test4));
 
   // 测试 5: Zombie process
-  auto* test5 = new TaskControlBlock("TestZombieProcess", 10,
-                                     test_zombie_process, nullptr);
-  task_mgr.AddTask(test5);
+  auto test5 = kstd::make_unique<TaskControlBlock>(
+      "TestZombieProcess", 10, test_zombie_process, nullptr);
+  task_mgr.AddTask(std::move(test5));
 
-  klog::Info("Exit System Test Suite: COMPLETED\n");
+  klog::Info("Waiting for all 5 sub-tests to complete...");
+
+  // 等待所有子测试完成（每个子测试在退出前会增加 g_tests_completed）
+  // 超时: 200 * 50ms = 10s
+  int timeout = 200;
+  while (timeout > 0) {
+    (void)sys_sleep(50);
+    if (g_tests_completed.load() >= 5) {
+      break;
+    }
+    timeout--;
+  }
+
+  klog::Info("Exit System Test: completed={}, failed={}",
+             g_tests_completed.load(), g_tests_failed.load());
+
+  EXPECT_EQ(g_tests_completed, 5, "All 5 sub-tests completed");
+  EXPECT_EQ(g_tests_failed, 0, "No sub-tests failed");
+
+  klog::Info("===== Exit System Test End =====");
   return true;
 }

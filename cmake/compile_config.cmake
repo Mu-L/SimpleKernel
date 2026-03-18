@@ -5,13 +5,22 @@ ADD_LIBRARY (compile_definitions INTERFACE)
 TARGET_COMPILE_DEFINITIONS (
     compile_definitions
     INTERFACE
+        _GLIBCXX_NO_ASSERTIONS
         $<$<CONFIG:Release>:SIMPLEKERNEL_RELEASE>
         $<$<CONFIG:Debug>:SIMPLEKERNEL_DEBUG>
+        $<$<CONFIG:Debug>:SIMPLEKERNEL_MIN_LOG_LEVEL=0>
         $<$<BOOL:${SIMPLEKERNEL_MAX_CORE_COUNT}>:SIMPLEKERNEL_MAX_CORE_COUNT=${SIMPLEKERNEL_MAX_CORE_COUNT}>
         $<$<BOOL:${SIMPLEKERNEL_DEFAULT_STACK_SIZE}>:SIMPLEKERNEL_DEFAULT_STACK_SIZE=${SIMPLEKERNEL_DEFAULT_STACK_SIZE}>
         $<$<BOOL:${SIMPLEKERNEL_PER_CPU_ALIGN_SIZE}>:SIMPLEKERNEL_PER_CPU_ALIGN_SIZE=${SIMPLEKERNEL_PER_CPU_ALIGN_SIZE}>
         SIMPLEKERNEL_EARLY_CONSOLE_BASE=${SIMPLEKERNEL_EARLY_CONSOLE_BASE}
         $<$<BOOL:${SIMPLEKERNEL_TICK}>:SIMPLEKERNEL_TICK=${SIMPLEKERNEL_TICK}>)
+
+# 第三方宏定义
+ADD_LIBRARY (3rd_compile_definitions INTERFACE)
+TARGET_COMPILE_DEFINITIONS (
+    3rd_compile_definitions
+    INTERFACE ETL_CPP23_SUPPORTED ETL_NO_STD_OSTREAM ETL_VERBOSE_ERRORS
+              ETL_NO_CPP_NAN_SUPPORT ETL_FORMAT_NO_FLOATING_POINT)
 
 # 获取 gcc 的 include 路径
 EXECUTE_PROCESS (
@@ -40,7 +49,7 @@ TARGET_COMPILE_OPTIONS (
     compile_options
     INTERFACE # 如果 CMAKE_BUILD_TYPE 为 Release 则使用 -O3 -Werror，否则使用 -O0 -ggdb -g
               # 在 Debug 模式下由 cmake 自动添加
-              $<$<CONFIG:Release>:-O3;-Werror>
+              $<$<CONFIG:Release>:-O2;-Werror>
               $<$<CONFIG:Debug>:-O0;-ggdb>
               # 打开全部警告
               -Wall
@@ -87,15 +96,6 @@ TARGET_COMPILE_OPTIONS (
               # 针对 cortex-a72 优化代码
               -mtune=cortex-a72
               -mno-outline-atomics
-              >
-              # gcc 特定选项
-              $<$<CXX_COMPILER_ID:GNU>:
-              >
-              # clang 特定选项
-              $<$<CXX_COMPILER_ID:Clang>:
-              >
-              # 平台相关
-              $<$<PLATFORM_ID:Darwin>:
               >
               # 将编译器的 include 路径添加到编译选项中，以便 clang-tidy 使用
               ${CROSS_INCLUDE_PATHS})
@@ -165,11 +165,13 @@ TARGET_LINK_LIBRARIES (
               kernel_compile_definitions
               kernel_compile_options
               kernel_link_options
-              nanoprintf-lib
+              3rd_compile_definitions
               dtc-lib
               cpu_io
               bmalloc
               MPMCQueue
+              fatfs_lib
+              etl::etl
               gcc
               $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},riscv64>:
               opensbi_interface

@@ -2,8 +2,7 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#ifndef SIMPLEKERNEL_SRC_INCLUDE_KERNEL_FDT_HPP_
-#define SIMPLEKERNEL_SRC_INCLUDE_KERNEL_FDT_HPP_
+#pragma once
 
 // 禁用 GCC/Clang 的警告
 #include <libfdt_env.h>
@@ -18,6 +17,11 @@
 #pragma GCC diagnostic pop
 #endif
 
+#include <cpu_io.h>
+#include <etl/singleton.h>
+
+#include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <tuple>
@@ -25,22 +29,30 @@
 
 #include "expected.hpp"
 #include "kernel_log.hpp"
-#include "singleton.hpp"
-#include "sk_cassert"
+#include "kstd_cstring"
 
 /**
- * fdt 相关
+ * @brief FDT（Flattened Device Tree）解析器
+ *
+ * 提供对 FDT 的解析功能，包括节点查找、属性读取、设备枚举等。
+ *
+ * @pre  FDT 数据必须是有效的 DTB 格式
+ * @post 通过各 Get* 方法可获取设备树中的硬件信息
+ *
+ * @note ForEachNode、ForEachCompatibleNode 和 ForEachDeviceNode
+ *       是模板方法，保留在头文件中
+ * @note compatible 属性是 stringlist 格式（多个以 '\0' 分隔的字符串），
+ *       回调接收完整的 compatible 数据和长度
  */
 class KernelFdt {
  public:
-  fdt_header* fdt_header_;
-
   /**
-   * 获取 core 数量
+   * @brief 获取 CPU 核心数量
    * @return Expected<size_t> 成功返回核心数，失败返回错误
+   * @pre fdt_header_ 不为空
    */
   [[nodiscard]] auto GetCoreCount() const -> Expected<size_t> {
-    sk_assert_msg(fdt_header_ != nullptr, "fdt_header_ is null");
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
 
     return CountNodesByDeviceType("cpu").and_then(
         [](size_t count) -> Expected<size_t> {
@@ -52,16 +64,17 @@ class KernelFdt {
   }
 
   /**
-   * 判断 psci 信息
+   * @brief 判断 PSCI 信息
    * @return Expected<void> 成功返回空，失败返回错误
+   * @pre fdt_header_ 不为空
    */
   [[nodiscard]] auto CheckPSCI() const -> Expected<void> {
-    sk_assert_msg(fdt_header_ != nullptr, "fdt_header_ is null");
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
 
     return FindNode("/psci").and_then([this](int offset) -> Expected<void> {
       return GetPsciMethod(offset).and_then(
           [this, offset](const char* method) -> Expected<void> {
-            klog::Debug("PSCI method: %s\n", method);
+            klog::Debug("PSCI method: {}", method);
             if (strcmp(method, "smc") != 0) {
               return std::unexpected(Error(ErrorCode::kFdtPropertyNotFound));
             }
@@ -71,12 +84,14 @@ class KernelFdt {
   }
 
   /**
-   * 获取内存信息
+   * @brief 获取内存信息
    * @return Expected<std::pair<uint64_t, size_t>> 内存信息<地址，长度>
+   * @pre fdt_header_ 不为空
+   * @post 返回第一个 reg 条目的 base 和 size
    */
   [[nodiscard]] auto GetMemory() const
       -> Expected<std::pair<uint64_t, size_t>> {
-    sk_assert_msg(fdt_header_ != nullptr, "fdt_header_ is null");
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
 
     return FindNode("/memory").and_then(
         [this](int offset) -> Expected<std::pair<uint64_t, size_t>> {
@@ -86,13 +101,14 @@ class KernelFdt {
   }
 
   /**
-   * 获取串口信息
+   * @brief 获取串口信息
    * @return Expected<std::tuple<uint64_t, size_t, uint32_t>>
-   * <地址，长度，中断号>
+   *         <地址，长度，中断号>
+   * @pre fdt_header_ 不为空
    */
   [[nodiscard]] auto GetSerial() const
       -> Expected<std::tuple<uint64_t, size_t, uint32_t>> {
-    sk_assert_msg(fdt_header_ != nullptr, "fdt_header_ is null");
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
 
     auto chosen_offset = FindNode("/chosen");
     if (!chosen_offset.has_value()) {
@@ -108,7 +124,7 @@ class KernelFdt {
 
     const char* stdout_path = reinterpret_cast<const char*>(prop->data);
     std::array<char, 256> path_buffer;
-    strncpy(path_buffer.data(), stdout_path, path_buffer.max_size());
+    kstd::strncpy(path_buffer.data(), stdout_path, path_buffer.max_size() - 1);
 
     char* colon = strchr(path_buffer.data(), ':');
     if (colon != nullptr) {
@@ -130,21 +146,11 @@ class KernelFdt {
       return std::unexpected(Error(ErrorCode::kFdtNodeNotFound));
     }
 
-    // Get reg property
-    prop = fdt_get_property(fdt_header_, stdout_offset, "reg", &len);
-    if (prop == nullptr) {
-      return std::unexpected(Error(ErrorCode::kFdtPropertyNotFound));
+    auto reg = GetRegProperty(stdout_offset);
+    if (!reg.has_value()) {
+      return std::unexpected(reg.error());
     }
 
-    uint64_t base = 0;
-    size_t size = 0;
-    const auto* reg = reinterpret_cast<const uint64_t*>(prop->data);
-    for (size_t i = 0; i < len / sizeof(uint64_t); i += 2) {
-      base = fdt64_to_cpu(reg[i]);
-      size = fdt64_to_cpu(reg[i + 1]);
-    }
-
-    // Get interrupts property
     prop = fdt_get_property(fdt_header_, stdout_offset, "interrupts", &len);
     if (prop == nullptr) {
       return std::unexpected(Error(ErrorCode::kFdtPropertyNotFound));
@@ -156,15 +162,16 @@ class KernelFdt {
       irq = fdt32_to_cpu(*interrupts);
     }
 
-    return std::tuple{base, size, irq};
+    return std::tuple{reg.value().first, reg.value().second, irq};
   }
 
   /**
-   * 获取 cpu 时钟
+   * @brief 获取 CPU 时钟频率
    * @return Expected<uint32_t> 时钟频率
+   * @pre fdt_header_ 不为空
    */
   [[nodiscard]] auto GetTimebaseFrequency() const -> Expected<uint32_t> {
-    sk_assert_msg(fdt_header_ != nullptr, "fdt_header_ is null");
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
 
     return FindNode("/cpus").and_then([this](int offset) -> Expected<uint32_t> {
       int len = 0;
@@ -183,13 +190,14 @@ class KernelFdt {
   }
 
   /**
-   * 获取 gic 信息
+   * @brief 获取 GIC 信息
    * @return Expected<std::tuple<...>>
-   * <dist地址，dist大小，redist地址，redist大小>
+   *         <dist地址，dist大小，redist地址，redist大小>
+   * @pre fdt_header_ 不为空
    */
   [[nodiscard]] auto GetGIC() const
       -> Expected<std::tuple<uint64_t, size_t, uint64_t, size_t>> {
-    sk_assert_msg(fdt_header_ != nullptr, "fdt_header_ is null");
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
 
     auto offset = FindCompatibleNode("arm,gic-v3");
     if (!offset.has_value()) {
@@ -222,7 +230,7 @@ class KernelFdt {
   }
 
   /**
-   * 获取 GIC Distributor 信息
+   * @brief 获取 GIC Distributor 信息
    * @return Expected<std::pair<uint64_t, size_t>>
    */
   [[nodiscard]] auto GetGicDist() const
@@ -234,7 +242,7 @@ class KernelFdt {
   }
 
   /**
-   * 获取 GIC CPU Interface (Redistributor) 信息
+   * @brief 获取 GIC CPU Interface (Redistributor) 信息
    * @return Expected<std::pair<uint64_t, size_t>>
    */
   [[nodiscard]] auto GetGicCpu() const
@@ -246,12 +254,14 @@ class KernelFdt {
   }
 
   /**
-   * 获取 aarch64 中断号
+   * @brief 获取 aarch64 中断号
+   * @param compatible 要查找的 compatible 字符串
    * @return Expected<uint64_t> intid
+   * @pre fdt_header_ 不为空
    */
   [[nodiscard]] auto GetAarch64Intid(const char* compatible) const
       -> Expected<uint64_t> {
-    sk_assert_msg(fdt_header_ != nullptr, "fdt_header_ is null");
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
 
     auto offset = FindEnabledCompatibleNode(compatible);
     if (!offset.has_value()) {
@@ -275,7 +285,7 @@ class KernelFdt {
       auto trigger = fdt32_to_cpu(interrupts[i / sizeof(uint32_t) + 2]) & 0xF;
       auto cpuid_mask =
           fdt32_to_cpu(interrupts[i / sizeof(uint32_t) + 2]) & 0xFF00;
-      klog::Debug("type: %d, intid: %d, trigger: %d, cpuid_mask: %d\n", type,
+      klog::Debug("type: {}, intid: {}, trigger: {}, cpuid_mask: {}", type,
                   intid, trigger, cpuid_mask);
     }
 #endif
@@ -291,15 +301,16 @@ class KernelFdt {
   }
 
   /**
-   * 获取 plic 信息
-   * @return 内存信息<地址，长度，中断源数量，上下文数量>
+   * @brief 获取 PLIC 信息
+   * @return Expected<std::tuple<...>>
+   *         <地址，长度，中断源数量，上下文数量>
+   * @pre fdt_header_ 不为空
    * @see https://github.com/qemu/qemu/blob/master/hw/arm/virt.c
    */
   [[nodiscard]] auto GetPlic() const
       -> Expected<std::tuple<uint64_t, uint64_t, uint32_t, uint32_t>> {
-    sk_assert_msg(fdt_header_ != nullptr, "fdt_header_ is null");
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
 
-    // 查找 PLIC 节点，依次尝试两个 compatible 字符串
     auto offset = FindCompatibleNode("sifive,plic-1.0.0");
     if (!offset.has_value()) {
       offset = FindCompatibleNode("riscv,plic0");
@@ -310,20 +321,15 @@ class KernelFdt {
 
     int len = 0;
 
-    // 通过 interrupts-extended 字段计算上下文数量
     const auto* prop = fdt_get_property(fdt_header_, offset.value(),
                                         "interrupts-extended", &len);
     if (prop == nullptr) {
       return std::unexpected(Error(ErrorCode::kFdtPropertyNotFound));
     }
 
-    // interrupts-extended 格式: <cpu_phandle interrupt_id> 成对出现
-    // 每两个 uint32_t 值表示一个上下文 (CPU + 模式)
     uint32_t num_entries = len / sizeof(uint32_t);
-    // 每两个条目表示一个上下文
     uint32_t context_count = num_entries / 2;
 
-    // 获取 ndev 属性
     prop = fdt_get_property(fdt_header_, offset.value(), "riscv,ndev", &len);
     if (prop == nullptr) {
       return std::unexpected(Error(ErrorCode::kFdtPropertyNotFound));
@@ -331,7 +337,6 @@ class KernelFdt {
     uint32_t ndev =
         fdt32_to_cpu(*reinterpret_cast<const uint32_t*>(prop->data));
 
-    // 获取 reg 属性
     auto reg = GetRegProperty(offset.value());
     if (!reg.has_value()) {
       return std::unexpected(reg.error());
@@ -342,25 +347,297 @@ class KernelFdt {
   }
 
   /**
-   * 构造函数
-   * @param header fdt 地址
+   * @brief 遍历 FDT 中所有设备节点
+   * @tparam Callback 回调类型，签名：
+   *   bool(const char* node_name, const char* compatible_data,
+   *        size_t compatible_len, uint64_t mmio_base, size_t mmio_size,
+   *        uint32_t irq)
+   *   返回 true 继续遍历，false 停止
+   * @param callback 节点处理函数
+   * @return Expected<void>
+   * @pre fdt_header_ 不为空
+   * @note compatible_data 是完整的 stringlist（多个字符串以 '\0' 分隔），
+   *       compatible_len 是整个 stringlist 的字节长度。
+   *       若需要显示第一个 compatible 字符串，直接使用 compatible_data 即可。
+   *       若需要遍历所有 compatible 字符串，需按 '\0' 分隔迭代。
    */
-  explicit KernelFdt(uint64_t header)
-      : fdt_header_(reinterpret_cast<fdt_header*>(header)) {
-    ValidateFdtHeader().or_else([](Error err) -> Expected<void> {
-      klog::Err("KernelFdt init failed: %s\n", err.message());
-      while (true) {
-        cpu_io::Pause();
-      }
-      return {};
-    });
+  template <typename Callback>
+  [[nodiscard]] auto ForEachNode(Callback&& callback) const -> Expected<void> {
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
 
-    klog::Debug("Load dtb at [0x%X], size [0x%X]\n", fdt_header_,
-                fdt32_to_cpu(fdt_header_->totalsize));
+    int offset = -1;
+    int depth = 0;
+
+    while (true) {
+      offset = fdt_next_node(fdt_header_, offset, &depth);
+      if (offset < 0) {
+        if (offset == -FDT_ERR_NOTFOUND) {
+          break;
+        }
+        return std::unexpected(Error(ErrorCode::kFdtParseFailed));
+      }
+
+      const char* node_name = fdt_get_name(fdt_header_, offset, nullptr);
+      if (node_name == nullptr) {
+        continue;
+      }
+
+      int status_len = 0;
+      const auto* status_prop =
+          fdt_get_property(fdt_header_, offset, "status", &status_len);
+      if (status_prop != nullptr) {
+        const char* status = reinterpret_cast<const char*>(status_prop->data);
+        if (strcmp(status, "okay") != 0 && strcmp(status, "ok") != 0) {
+          continue;
+        }
+      }
+
+      const char* compatible_data = nullptr;
+      size_t compatible_len = 0;
+      int compat_len = 0;
+      const auto* compat_prop =
+          fdt_get_property(fdt_header_, offset, "compatible", &compat_len);
+      if (compat_prop != nullptr && compat_len > 0) {
+        compatible_data = reinterpret_cast<const char*>(compat_prop->data);
+        compatible_len = static_cast<size_t>(compat_len);
+      }
+
+      uint64_t mmio_base = 0;
+      size_t mmio_size = 0;
+      int reg_len = 0;
+      const auto* reg_prop =
+          fdt_get_property(fdt_header_, offset, "reg", &reg_len);
+      if (reg_prop != nullptr &&
+          static_cast<size_t>(reg_len) >= 2 * sizeof(uint64_t)) {
+        const auto* reg = reinterpret_cast<const uint64_t*>(reg_prop->data);
+        mmio_base = fdt64_to_cpu(reg[0]);
+        mmio_size = fdt64_to_cpu(reg[1]);
+      }
+
+      uint32_t irq = 0;
+      int irq_len = 0;
+      const auto* irq_prop =
+          fdt_get_property(fdt_header_, offset, "interrupts", &irq_len);
+      if (irq_prop != nullptr &&
+          static_cast<size_t>(irq_len) >= sizeof(uint32_t)) {
+        const auto* interrupts =
+            reinterpret_cast<const uint32_t*>(irq_prop->data);
+        irq = fdt32_to_cpu(interrupts[0]);
+      }
+
+      if (!callback(node_name, compatible_data, compatible_len, mmio_base,
+                    mmio_size, irq)) {
+        break;
+      }
+    }
+
+    return {};
+  }
+
+  /**
+   * @brief 遍历所有匹配指定 compatible 的 FDT 节点
+   * @tparam Callback 回调类型，签名：
+   *   bool(int offset, const char* node_name,
+   *        uint64_t mmio_base, size_t mmio_size, uint32_t irq)
+   *   返回 true 继续遍历，false 停止
+   * @param compatible 要匹配的 compatible 字符串
+   * @param callback 节点处理函数
+   * @return Expected<void>
+   * @pre fdt_header_ 不为空
+   * @note 使用 fdt_node_offset_by_compatible 的迭代模式，
+   *       可正确处理多个节点共享相同 compatible 的情况
+   */
+  template <typename Callback>
+  [[nodiscard]] auto ForEachCompatibleNode(const char* compatible,
+                                           Callback&& callback) const
+      -> Expected<void> {
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
+
+    int offset = -1;
+    while (true) {
+      offset = fdt_node_offset_by_compatible(fdt_header_, offset, compatible);
+      if (offset < 0) {
+        if (offset == -FDT_ERR_NOTFOUND) {
+          break;
+        }
+        return std::unexpected(Error(ErrorCode::kFdtParseFailed));
+      }
+
+      const char* node_name = fdt_get_name(fdt_header_, offset, nullptr);
+      if (node_name == nullptr) {
+        continue;
+      }
+
+      uint64_t mmio_base = 0;
+      size_t mmio_size = 0;
+      int reg_len = 0;
+      const auto* reg_prop =
+          fdt_get_property(fdt_header_, offset, "reg", &reg_len);
+      if (reg_prop != nullptr &&
+          static_cast<size_t>(reg_len) >= 2 * sizeof(uint64_t)) {
+        const auto* reg = reinterpret_cast<const uint64_t*>(reg_prop->data);
+        mmio_base = fdt64_to_cpu(reg[0]);
+        mmio_size = fdt64_to_cpu(reg[1]);
+      }
+
+      uint32_t irq = 0;
+      int irq_len = 0;
+      const auto* irq_prop =
+          fdt_get_property(fdt_header_, offset, "interrupts", &irq_len);
+      if (irq_prop != nullptr &&
+          static_cast<size_t>(irq_len) >= sizeof(uint32_t)) {
+        const auto* interrupts =
+            reinterpret_cast<const uint32_t*>(irq_prop->data);
+        irq = fdt32_to_cpu(interrupts[0]);
+      }
+
+      if (!callback(offset, node_name, mmio_base, mmio_size, irq)) {
+        break;
+      }
+    }
+
+    return {};
+  }
+
+  /**
+   * @brief 遍历 FDT 中所有"叶设备"节点，自动跳过基础设施节点。
+   *
+   * 在 ForEachNode 的基础上，额外过滤掉以下节点：
+   *   - 具有 `interrupt-controller` 属性（中断控制器）
+   *   - 具有 `#clock-cells` 属性（时钟提供者）
+   *   - `device_type = "cpu"` 或 `device_type = "memory"`
+   *
+   * @tparam Callback 签名与 ForEachNode 完全相同：
+   *   bool(const char* node_name, const char* compatible_data,
+   *        size_t compatible_len, uint64_t mmio_base, size_t mmio_size,
+   *        uint32_t irq)
+   * @param  callback 节点处理函数，返回 false 停止遍历
+   * @return Expected<void>
+   * @pre    fdt_header_ 不为空
+   */
+  template <typename Callback>
+  [[nodiscard]] auto ForEachDeviceNode(Callback&& callback) const
+      -> Expected<void> {
+    assert(fdt_header_ != nullptr && "ForEachDeviceNode: fdt_header_ is null");
+
+    int offset = -1;
+    int depth = 0;
+
+    while (true) {
+      offset = fdt_next_node(fdt_header_, offset, &depth);
+      if (offset < 0) {
+        if (offset == -FDT_ERR_NOTFOUND) {
+          break;
+        }
+        return std::unexpected(Error(ErrorCode::kFdtParseFailed));
+      }
+
+      const char* node_name = fdt_get_name(fdt_header_, offset, nullptr);
+      if (node_name == nullptr) {
+        continue;
+      }
+
+      // status 过滤（与 ForEachNode 相同）
+      int status_len = 0;
+      const auto* status_prop =
+          fdt_get_property(fdt_header_, offset, "status", &status_len);
+      if (status_prop != nullptr) {
+        const char* status = reinterpret_cast<const char*>(status_prop->data);
+        if (strcmp(status, "okay") != 0 && strcmp(status, "ok") != 0) {
+          continue;
+        }
+      }
+
+      // 基础设施节点过滤
+      if (fdt_getprop(fdt_header_, offset, "interrupt-controller", nullptr) !=
+          nullptr) {
+        continue;
+      }
+      if (fdt_getprop(fdt_header_, offset, "#clock-cells", nullptr) !=
+          nullptr) {
+        continue;
+      }
+      {
+        int dt_len = 0;
+        const auto* dt_prop =
+            fdt_get_property(fdt_header_, offset, "device_type", &dt_len);
+        if (dt_prop != nullptr) {
+          const char* dt = reinterpret_cast<const char*>(dt_prop->data);
+          if (strcmp(dt, "cpu") == 0 || strcmp(dt, "memory") == 0) {
+            continue;
+          }
+        }
+      }
+
+      // compatible 提取
+      const char* compatible_data = nullptr;
+      size_t compatible_len = 0;
+      int compat_len = 0;
+      const auto* compat_prop =
+          fdt_get_property(fdt_header_, offset, "compatible", &compat_len);
+      if (compat_prop != nullptr && compat_len > 0) {
+        compatible_data = reinterpret_cast<const char*>(compat_prop->data);
+        compatible_len = static_cast<size_t>(compat_len);
+      }
+
+      // reg 提取
+      uint64_t mmio_base = 0;
+      size_t mmio_size = 0;
+      int reg_len = 0;
+      const auto* reg_prop =
+          fdt_get_property(fdt_header_, offset, "reg", &reg_len);
+      if (reg_prop != nullptr &&
+          static_cast<size_t>(reg_len) >= 2 * sizeof(uint64_t)) {
+        const auto* reg = reinterpret_cast<const uint64_t*>(reg_prop->data);
+        mmio_base = fdt64_to_cpu(reg[0]);
+        mmio_size = fdt64_to_cpu(reg[1]);
+      }
+
+      // interrupts 提取
+      uint32_t irq = 0;
+      int irq_len = 0;
+      const auto* irq_prop =
+          fdt_get_property(fdt_header_, offset, "interrupts", &irq_len);
+      if (irq_prop != nullptr &&
+          static_cast<size_t>(irq_len) >= sizeof(uint32_t)) {
+        const auto* interrupts =
+            reinterpret_cast<const uint32_t*>(irq_prop->data);
+        irq = fdt32_to_cpu(interrupts[0]);
+      }
+
+      if (!callback(node_name, compatible_data, compatible_len, mmio_base,
+                    mmio_size, irq)) {
+        break;
+      }
+    }
+
+    return {};
   }
 
   /// @name 构造/析构函数
   /// @{
+
+  /**
+   * @brief 构造函数
+   * @param header fdt 数据地址
+   * @pre header 指向有效的 DTB 数据
+   * @post fdt_header_ 已初始化并通过校验
+   */
+  explicit KernelFdt(uint64_t header)
+      : fdt_header_(reinterpret_cast<fdt_header*>(header)) {
+    ValidateFdtHeader().or_else([](auto&& err) {
+      klog::Err("KernelFdt init failed: {}", err.message());
+      while (true) {
+        cpu_io::Pause();
+      }
+      return Expected<void>{};
+    });
+
+    klog::Debug("Load dtb at [{:#X}], size [{:#X}]",
+                static_cast<uint64_t>(reinterpret_cast<uintptr_t>(fdt_header_)),
+                static_cast<uint64_t>(fdt32_to_cpu(fdt_header_->totalsize)));
+  }
+
   KernelFdt() = default;
   KernelFdt(const KernelFdt&) = default;
   KernelFdt(KernelFdt&&) = default;
@@ -370,6 +647,9 @@ class KernelFdt {
   /// @}
 
  private:
+  /// FDT header 指针
+  fdt_header* fdt_header_{nullptr};
+
   /// PSCI 标准函数 ID（SMC64 调用约定）
   /// @see https://developer.arm.com/documentation/den0022/fb/?lang=en
   /// @note 高位 0xC4 表示 SMC64 快速调用，0x84 表示 SMC32 快速调用
@@ -378,10 +658,11 @@ class KernelFdt {
   static constexpr uint64_t kPsciCpuSuspendFuncId = 0xC4000001;
 
   /**
-   * 验证 FDT header
+   * @brief 验证 FDT header
+   * @return Expected<void>
    */
   [[nodiscard]] auto ValidateFdtHeader() const -> Expected<void> {
-    sk_assert_msg(fdt_header_ != nullptr, "fdt_header_ is null");
+    assert(fdt_header_ != nullptr && "fdt_header_ is null");
     if (fdt_check_header(fdt_header_) != 0) {
       return std::unexpected(Error(ErrorCode::kFdtInvalidHeader));
     }
@@ -389,7 +670,9 @@ class KernelFdt {
   }
 
   /**
-   * 查找节点
+   * @brief 按路径查找节点
+   * @param path 节点路径（如 "/memory"）
+   * @return Expected<int> 节点偏移量
    */
   [[nodiscard]] auto FindNode(const char* path) const -> Expected<int> {
     auto offset = fdt_path_offset(fdt_header_, path);
@@ -400,7 +683,9 @@ class KernelFdt {
   }
 
   /**
-   * 按 compatible 查找节点
+   * @brief 按 compatible 查找第一个匹配的节点
+   * @param compatible 要查找的 compatible 字符串
+   * @return Expected<int> 节点偏移量
    */
   [[nodiscard]] auto FindCompatibleNode(const char* compatible) const
       -> Expected<int> {
@@ -412,7 +697,7 @@ class KernelFdt {
   }
 
   /**
-   * 根据 compatible 查找已启用的节点（跳过 status="disabled" 的节点）
+   * @brief 根据 compatible 查找已启用的节点（跳过 status="disabled"）
    * @param compatible 要查找的 compatible 字符串
    * @return Expected<int> 节点偏移量
    */
@@ -425,28 +710,26 @@ class KernelFdt {
         return std::unexpected(Error(ErrorCode::kFdtNodeNotFound));
       }
 
-      // 检查 status 属性
       int len = 0;
       const auto* status_prop =
           fdt_get_property(fdt_header_, offset, "status", &len);
 
-      // 如果没有 status 属性，默认为 okay
       if (status_prop == nullptr) {
         return offset;
       }
 
-      // 检查 status 是否为 "okay" 或 "ok"
       const char* status = reinterpret_cast<const char*>(status_prop->data);
       if (strcmp(status, "okay") == 0 || strcmp(status, "ok") == 0) {
         return offset;
       }
-
-      // 继续查找下一个匹配的节点
     }
   }
 
   /**
-   * 获取 reg 属性
+   * @brief 获取 reg 属性（返回第一个 reg 条目）
+   * @param offset 节点偏移量
+   * @return Expected<std::pair<uint64_t, size_t>> base 和 size
+   * @post 返回第一个 <base, size> 对，而非最后一个
    */
   [[nodiscard]] auto GetRegProperty(int offset) const
       -> Expected<std::pair<uint64_t, size_t>> {
@@ -456,18 +739,18 @@ class KernelFdt {
       return std::unexpected(Error(ErrorCode::kFdtPropertyNotFound));
     }
 
-    uint64_t base = 0;
-    size_t size = 0;
     const auto* reg = reinterpret_cast<const uint64_t*>(prop->data);
-    for (size_t i = 0; i < len / sizeof(uint64_t); i += 2) {
-      base = fdt64_to_cpu(reg[i]);
-      size = fdt64_to_cpu(reg[i + 1]);
+    if (static_cast<size_t>(len) < 2 * sizeof(uint64_t)) {
+      return std::unexpected(Error(ErrorCode::kFdtInvalidPropertySize));
     }
+
+    uint64_t base = fdt64_to_cpu(reg[0]);
+    size_t size = fdt64_to_cpu(reg[1]);
     return std::pair{base, size};
   }
 
   /**
-   * 按 device_type 统计节点数量
+   * @brief 按 device_type 统计节点数量
    * @param device_type 设备类型
    * @return Expected<size_t> 节点数量
    */
@@ -499,7 +782,7 @@ class KernelFdt {
   }
 
   /**
-   * 获取 PSCI method 属性
+   * @brief 获取 PSCI method 属性
    * @param offset 节点偏移
    * @return Expected<const char*> method 字符串
    */
@@ -513,7 +796,7 @@ class KernelFdt {
   }
 
   /**
-   * 验证 PSCI 函数 ID
+   * @brief 验证 PSCI 函数 ID
    * @param offset 节点偏移
    * @return Expected<void> 验证结果
    */
@@ -526,9 +809,9 @@ class KernelFdt {
       if (prop != nullptr && static_cast<size_t>(len) >= sizeof(uint32_t)) {
         uint32_t id =
             fdt32_to_cpu(*reinterpret_cast<const uint32_t*>(prop->data));
-        klog::Debug("PSCI %s function ID: 0x%X\n", name, id);
+        klog::Debug("PSCI {} function ID: {:#X}", name, id);
         if (id != expected) {
-          klog::Err("PSCI %s function ID mismatch: expected 0x%X, got 0x%X\n",
+          klog::Err("PSCI {} function ID mismatch: expected {:#X}, got {:#X}",
                     name, expected, id);
           return std::unexpected(Error(ErrorCode::kFdtPropertyNotFound));
         }
@@ -544,4 +827,4 @@ class KernelFdt {
   }
 };
 
-#endif /* SIMPLEKERNEL_SRC_INCLUDE_KERNEL_FDT_HPP_ */
+using KernelFdtSingleton = etl::singleton<KernelFdt>;

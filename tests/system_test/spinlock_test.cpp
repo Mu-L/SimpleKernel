@@ -4,12 +4,13 @@
 
 #include "spinlock.hpp"
 
+#include <etl/format.h>
+
 #include <atomic>
 #include <cstdint>
 
 #include "basic_info.hpp"
 #include "cpu_io.h"
-#include "sk_stdio.h"
 #include "system_test.h"
 
 namespace {
@@ -21,7 +22,7 @@ class TestSpinLock : public SpinLock {
 };
 
 auto test_basic_lock() -> bool {
-  sk_printf("Running test_basic_lock...\n");
+  klog::Info("Running test_basic_lock...");
   TestSpinLock lock("basic");
   EXPECT_TRUE(lock.Lock(), "Basic lock failed");
   EXPECT_TRUE(lock.IsLockedByCurrentCore(),
@@ -29,65 +30,65 @@ auto test_basic_lock() -> bool {
   EXPECT_TRUE(lock.UnLock(), "Basic unlock failed");
   EXPECT_TRUE(!lock.IsLockedByCurrentCore(),
               "IsLockedByCurrentCore failed after unlock");
-  sk_printf("test_basic_lock passed\n");
+  klog::Info("test_basic_lock passed");
   return true;
 }
 
 auto test_recursive_lock() -> bool {
-  sk_printf("Running test_recursive_lock...\n");
+  klog::Info("Running test_recursive_lock...");
   TestSpinLock lock("recursive");
   EXPECT_TRUE(lock.Lock(), "Lock failed in recursive test");
   // Lock() 如果已经被当前核心锁定则返回 false
   if (lock.Lock()) {
-    sk_printf("FAIL: Recursive lock should return false\n");
-    lock.UnLock();  // 尝试恢复
-    lock.UnLock();
+    klog::Err("FAIL: Recursive lock should return false");
+    (void)lock.UnLock();  // 尝试恢复
+    (void)lock.UnLock();
     return false;
   }
 
   EXPECT_TRUE(lock.UnLock(), "Unlock failed in recursive test");
   // 再次解锁应该失败
   if (lock.UnLock()) {
-    sk_printf("FAIL: Double unlock should return false\n");
+    klog::Err("FAIL: Double unlock should return false");
     return false;
   }
-  sk_printf("test_recursive_lock passed\n");
+  klog::Info("test_recursive_lock passed");
   return true;
 }
 
 auto test_lock_guard() -> bool {
-  sk_printf("Running test_lock_guard...\n");
+  klog::Info("Running test_lock_guard...");
   TestSpinLock lock("guard");
   {
     LockGuard<TestSpinLock> guard(lock);
     EXPECT_TRUE(lock.IsLockedByCurrentCore(), "LockGuard failed to lock");
   }
   EXPECT_TRUE(!lock.IsLockedByCurrentCore(), "LockGuard failed to unlock");
-  sk_printf("test_lock_guard passed\n");
+  klog::Info("test_lock_guard passed");
   return true;
 }
 
 auto test_interrupt_restore() -> bool {
-  sk_printf("Running test_interrupt_restore...\n");
+  klog::Info("Running test_interrupt_restore...");
   TestSpinLock lock("intr");
 
   // Case 1: Interrupts enabled
   cpu_io::EnableInterrupt();
   if (!cpu_io::GetInterruptStatus()) {
-    sk_printf("FAIL: Failed to enable interrupts\n");
+    klog::Err("FAIL: Failed to enable interrupts");
     return false;
   }
 
-  lock.Lock();
+  (void)lock.Lock();
   if (cpu_io::GetInterruptStatus()) {
-    sk_printf("FAIL: Lock didn't disable interrupts\n");
-    lock.UnLock();
+    klog::Err("FAIL: Lock didn't disable interrupts");
+    (void)lock.UnLock();
     return false;
   }
-  lock.UnLock();
+  (void)lock.UnLock();
 
   if (!cpu_io::GetInterruptStatus()) {
-    sk_printf("FAIL: Unlock didn't restore interrupts (expected enabled)\n");
+    klog::Err("FAIL: Unlock didn't restore interrupts (expected enabled)");
     return false;
   }
 
@@ -95,27 +96,27 @@ auto test_interrupt_restore() -> bool {
   cpu_io::DisableInterrupt();
   // Ensure disabled
   if (cpu_io::GetInterruptStatus()) {
-    sk_printf("FAIL: Failed to disable interrupts for test\n");
+    klog::Err("FAIL: Failed to disable interrupts for test");
     return false;
   }
 
-  lock.Lock();
+  (void)lock.Lock();
   if (cpu_io::GetInterruptStatus()) {
-    sk_printf("FAIL: Lock enabled interrupts unexpectedly\n");
-    lock.UnLock();
+    klog::Err("FAIL: Lock enabled interrupts unexpectedly");
+    (void)lock.UnLock();
     cpu_io::EnableInterrupt();
     return false;
   }
-  lock.UnLock();
+  (void)lock.UnLock();
 
   if (cpu_io::GetInterruptStatus()) {
-    sk_printf("FAIL: Unlock enabled interrupts (expected disabled)\n");
+    klog::Err("FAIL: Unlock enabled interrupts (expected disabled)");
     cpu_io::EnableInterrupt();
     return false;
   }
 
   cpu_io::EnableInterrupt();  // Cleanup
-  sk_printf("test_interrupt_restore passed\n");
+  klog::Info("test_interrupt_restore passed");
   return true;
 }
 
@@ -125,23 +126,22 @@ std::atomic<int> finished_cores = 0;
 
 auto spinlock_smp_test() -> bool {
   for (int i = 0; i < 10000; ++i) {
-    smp_lock.Lock();
+    (void)smp_lock.Lock();
     shared_counter++;
-    smp_lock.UnLock();
+    (void)smp_lock.UnLock();
   }
 
   int finished = finished_cores.fetch_add(1) + 1;
-  int total_cores = Singleton<BasicInfo>::GetInstance().core_count;
+  int total_cores = BasicInfoSingleton::instance().core_count;
 
   if (finished == total_cores) {
     bool passed = (shared_counter == total_cores * 10000);
     if (passed) {
-      sk_printf(" All cores finished. shared_counter = %d. OK.\n",
-                shared_counter);
+      klog::Info(" All cores finished. shared_counter = {}. OK.",
+                 shared_counter);
     } else {
-      sk_printf(
-          " All cores finished. shared_counter = %d. EXPECTED %d. FAIL.\n",
-          shared_counter, total_cores * 10000);
+      klog::Err(" All cores finished. shared_counter = {}. EXPECTED {}. FAIL.",
+                shared_counter, total_cores * 10000);
     }
     return passed;
   }
@@ -160,32 +160,32 @@ auto spinlock_smp_buffer_test() -> bool {
   int writes_per_core = 500;
 
   for (int i = 0; i < writes_per_core; ++i) {
-    buffer_lock.Lock();
+    (void)buffer_lock.Lock();
     if (buffer_index < BUFFER_SIZE) {
       // 写入 Core ID
       shared_buffer[buffer_index++] = cpu_io::GetCurrentCoreId();
     }
-    buffer_lock.UnLock();
+    (void)buffer_lock.UnLock();
   }
 
   int finished = buffer_test_finished_cores.fetch_add(1) + 1;
-  int total_cores = Singleton<BasicInfo>::GetInstance().core_count;
+  int total_cores = BasicInfoSingleton::instance().core_count;
 
   if (finished == total_cores) {
     // 最后一个完成的核心进行检查
-    sk_printf("All cores finished buffer writes. Checking buffer...\n");
+    klog::Info("All cores finished buffer writes. Checking buffer...");
 
     // 检查写入总数
     int expected_writes = writes_per_core * total_cores;
     if (expected_writes > BUFFER_SIZE) expected_writes = BUFFER_SIZE;
 
     if (buffer_index != expected_writes) {
-      sk_printf("FAIL: Buffer index %d, expected %d\n", buffer_index,
+      klog::Err("FAIL: Buffer index {}, expected {}", buffer_index,
                 expected_writes);
       return false;
     }
 
-    sk_printf("Buffer test passed. Final index: %d\n", buffer_index);
+    klog::Info("Buffer test passed. Final index: {}", buffer_index);
     return true;
   }
 
@@ -203,21 +203,28 @@ std::atomic<int> str_test_start_barrier = 0;
 
 auto spinlock_smp_string_test() -> bool {
   size_t core_id = cpu_io::GetCurrentCoreId();
-  size_t core_count = Singleton<BasicInfo>::GetInstance().core_count;
+  size_t core_count = BasicInfoSingleton::instance().core_count;
 
-  // 需求 1: 确保核心数大于 1
   if (core_count < 2) {
     if (core_id == 0) {
-      sk_printf("Skipping SMP string test: need more than 1 core.\n");
+      klog::Info("Skipping SMP string test: need more than 1 core.");
     }
     return true;
   }
 
-  // Barrier: 等待所有核心到达此处
-  // 确保它们大致同时开始写入以引起竞争
-  str_test_start_barrier.fetch_add(1);
+  int arrived = str_test_start_barrier.fetch_add(1) + 1;
+
+  constexpr int kBarrierSpinLimit = 100000000;
+  int spins = 0;
   while (str_test_start_barrier.load() < (int)core_count) {
-    ;
+    if (++spins > kBarrierSpinLimit) {
+      if (core_id == 0) {
+        klog::Err(
+            "SMP string test barrier timeout: {}/{} cores arrived, skipping",
+            str_test_start_barrier.load(), (int)core_count);
+      }
+      return true;
+    }
   }
 
   int writes_per_core = 500;
@@ -226,11 +233,13 @@ auto spinlock_smp_string_test() -> bool {
   for (int i = 0; i < writes_per_core; ++i) {
     // 2. 先写入可区分的字符串到本地缓冲区
     // 增加数据长度以增加临界区持续时间
-    int len = sk_snprintf(local_buf, sizeof(local_buf),
-                          "[C:%d-%d|LongStringPaddingForContention]",
-                          (int)core_id, i);
+    auto* end = etl::format_to_n(local_buf, sizeof(local_buf) - 1,
+                                 "[C:{}-{}|LongStringPaddingForContention]",
+                                 (int)core_id, i);
+    *end = '\0';
+    int len = static_cast<int>(end - local_buf);
 
-    str_lock.Lock();
+    (void)str_lock.Lock();
     if (str_buffer_offset + len < STR_BUFFER_SIZE - 1) {
       for (int k = 0; k < len; ++k) {
         shared_str_buffer[str_buffer_offset + k] = local_buf[k];
@@ -238,14 +247,14 @@ auto spinlock_smp_string_test() -> bool {
       str_buffer_offset += len;
       shared_str_buffer[str_buffer_offset] = '\0';
     }
-    str_lock.UnLock();
+    (void)str_lock.UnLock();
   }
 
   int finished = str_test_finished_cores.fetch_add(1) + 1;
   if (finished == (int)core_count) {
     // 3. 验证
-    sk_printf(
-        "All cores finished string writes. Verifying string integrity...\n");
+    klog::Info(
+        "All cores finished string writes. Verifying string integrity...");
     bool failed = false;
     int current_idx = 0;
     int tokens_found = 0;
@@ -253,7 +262,7 @@ auto spinlock_smp_string_test() -> bool {
     while (current_idx < str_buffer_offset) {
       if (shared_str_buffer[current_idx] != '[') {
         failed = true;
-        sk_printf("FAIL: Expected '[' at %d, got '%c'\n", current_idx,
+        klog::Err("FAIL: Expected '[' at {}, got '{}'", current_idx,
                   shared_str_buffer[current_idx]);
         break;
       }
@@ -275,7 +284,7 @@ auto spinlock_smp_string_test() -> bool {
 
       if (!closed) {
         failed = true;
-        sk_printf("FAIL: Broken token starting at %d\n", current_idx);
+        klog::Err("FAIL: Broken token starting at {}", current_idx);
         break;
       }
 
@@ -283,12 +292,12 @@ auto spinlock_smp_string_test() -> bool {
       if (shared_str_buffer[current_idx + 1] != 'C' ||
           shared_str_buffer[current_idx + 2] != ':') {
         failed = true;
-        sk_printf("FAIL: Invalid content in token at %d\n", current_idx);
+        klog::Err("FAIL: Invalid content in token at {}", current_idx);
         break;
       }
 
       // 验证填充完整性
-      const char *padding = "|LongStringPaddingForContention";
+      const char* padding = "|LongStringPaddingForContention";
       int padding_len = 31;  // "|LongStringPaddingForContention" 的长度
       int token_content_len = end_idx - current_idx - 1;
       bool padding_ok = true;
@@ -307,7 +316,7 @@ auto spinlock_smp_string_test() -> bool {
 
       if (!padding_ok) {
         failed = true;
-        sk_printf("FAIL: Broken padding in token at %d. Content len: %d\n",
+        klog::Err("FAIL: Broken padding in token at {}. Content len: {}",
                   current_idx, token_content_len);
         break;
       }
@@ -321,13 +330,13 @@ auto spinlock_smp_string_test() -> bool {
 
     if (tokens_found != expected_tokens) {
       failed = true;
-      sk_printf("FAIL: Expected %d tokens, found %d\n", expected_tokens,
+      klog::Err("FAIL: Expected {} tokens, found {}", expected_tokens,
                 tokens_found);
     }
 
     if (!failed) {
-      sk_printf("String test passed. Length: %d, Tokens: %d\n",
-                str_buffer_offset, tokens_found);
+      klog::Info("String test passed. Length: {}, Tokens: {}",
+                 str_buffer_offset, tokens_found);
     }
     return !failed;
   }
@@ -342,7 +351,7 @@ auto spinlock_test() -> bool {
 
   // 单元测试仅在核心 0 上运行，以避免日志混乱
   if (core_id == 0) {
-    sk_printf("Starting spinlock_test\n");
+    klog::Info("Starting spinlock_test");
     ret = ret && test_basic_lock();
     ret = ret && test_recursive_lock();
     ret = ret && test_lock_guard();
@@ -357,9 +366,9 @@ auto spinlock_test() -> bool {
 
   if (core_id == 0) {
     if (ret) {
-      sk_printf("spinlock_test passed\n");
+      klog::Info("spinlock_test passed");
     } else {
-      sk_printf("spinlock_test failed\n");
+      klog::Err("spinlock_test failed");
     }
   }
   return ret;

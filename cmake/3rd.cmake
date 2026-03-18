@@ -58,22 +58,6 @@ IF(NOT TARGET gtest)
     INCLUDE (GoogleTest)
 ENDIF()
 
-# https://github.com/charlesnicholson/nanoprintf.git
-SET (nanoprintf_SOURCE_DIR ${CMAKE_SOURCE_DIR}/3rd/nanoprintf)
-SET (nanoprintf_BINARY_DIR ${CMAKE_BINARY_DIR}/3rd/nanoprintf)
-ADD_CUSTOM_TARGET (
-    nanoprintf
-    COMMENT "build nanoprintf..."
-    # make 时编译
-    ALL
-    WORKING_DIRECTORY ${nanoprintf_SOURCE_DIR}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${nanoprintf_BINARY_DIR}
-    COMMAND ${CMAKE_COMMAND} -E copy ${nanoprintf_SOURCE_DIR}/nanoprintf.h
-            ${nanoprintf_BINARY_DIR}/nanoprintf.h)
-ADD_LIBRARY (nanoprintf-lib INTERFACE)
-ADD_DEPENDENCIES (nanoprintf-lib nanoprintf)
-TARGET_INCLUDE_DIRECTORIES (nanoprintf-lib INTERFACE ${nanoprintf_BINARY_DIR})
-
 # https://github.com/MRNIU/bmalloc.git
 ADD_SUBDIRECTORY (3rd/bmalloc)
 
@@ -82,6 +66,21 @@ ADD_SUBDIRECTORY (3rd/cpu_io)
 
 # https://github.com/MRNIU/MPMCQueue.git
 ADD_SUBDIRECTORY (3rd/MPMCQueue)
+
+# https://github.com/ETLCPP/etl.git
+ADD_SUBDIRECTORY (3rd/etl)
+
+# https://github.com/armink/EasyLogger.git
+# ADD_SUBDIRECTORY (3rd/EasyLogger)
+
+# https://github.com/abbrev/fatfs.git
+# @todo 计划使用 c++ 重写
+SET (fatfs_SOURCE_DIR ${CMAKE_SOURCE_DIR}/3rd/fatfs)
+SET (fatfs_BINARY_DIR ${CMAKE_BINARY_DIR}/3rd/fatfs)
+ADD_LIBRARY (fatfs_lib INTERFACE)
+TARGET_INCLUDE_DIRECTORIES (fatfs_lib INTERFACE ${fatfs_SOURCE_DIR}/source)
+TARGET_SOURCES (fatfs_lib INTERFACE ${fatfs_SOURCE_DIR}/source/ff.c
+                                    ${fatfs_SOURCE_DIR}/source/ffunicode.c)
 
 IF(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "riscv64")
     # https://github.com/riscv-software-src/opensbi.git
@@ -225,21 +224,6 @@ TARGET_LINK_LIBRARIES (dtc-lib INTERFACE ${dtc_BINARY_DIR}/libfdt/libfdt.a)
 
 # doxygen
 FIND_PACKAGE (Doxygen REQUIRED dot)
-
-# cppcheck
-FIND_PROGRAM (CPPCHECK_EXE NAMES cppcheck)
-
-# cppcheck
-FIND_PROGRAM (CPPCHECK_EXE NAMES cppcheck)
-ADD_CUSTOM_TARGET (
-    cppcheck
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Run cppcheck on ${CMAKE_BINARY_DIR}/compile_commands.json ..."
-    COMMAND
-        ${CPPCHECK_EXE} --enable=all
-        --project=${CMAKE_BINARY_DIR}/compile_commands.json
-        --suppress-xml=${CMAKE_SOURCE_DIR}/tools/cppcheck-suppressions.xml
-        --output-file=${CMAKE_BINARY_DIR}/cppcheck_report.log)
 
 IF(CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
     # genhtml 生成测试覆盖率报告网页

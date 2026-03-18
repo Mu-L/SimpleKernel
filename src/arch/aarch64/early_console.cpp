@@ -2,29 +2,46 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#include "pl011.h"
-#include "singleton.hpp"
-#include "sk_cstdio"
+#include "pl011/pl011_driver.hpp"
+#include "pl011_singleton.h"
 
 namespace {
 
-Pl011* pl011 = nullptr;
+pl011::Pl011Device* pl011_uart = nullptr;
 
-void console_putchar(int c, [[maybe_unused]] void* ctx) {
-  if (pl011) {
-    pl011->PutChar(c);
-  }
-}
+/**
+ * @brief 早期控制台初始化类
+ * @note 通过全局构造在内核 main 之前初始化 PL011 串口输出
+ */
+class EarlyConsole {
+ public:
+  /// @name 构造/析构函数
+  /// @{
 
-struct EarlyConsole {
+  /// 初始化 PL011 串口输出
   EarlyConsole() {
-    Singleton<Pl011>::GetInstance() = Pl011(SIMPLEKERNEL_EARLY_CONSOLE_BASE);
-    pl011 = &Singleton<Pl011>::GetInstance();
-
-    sk_putchar = console_putchar;
+    Pl011Singleton::create(SIMPLEKERNEL_EARLY_CONSOLE_BASE);
+    pl011_uart = &Pl011Singleton::instance();
   }
+
+  EarlyConsole(const EarlyConsole&) = delete;
+  EarlyConsole(EarlyConsole&&) = delete;
+  auto operator=(const EarlyConsole&) -> EarlyConsole& = delete;
+  auto operator=(EarlyConsole&&) -> EarlyConsole& = delete;
+  ~EarlyConsole() = default;
+  /// @}
 };
 
 EarlyConsole early_console;
 
 }  // namespace
+
+/**
+ * @brief 早期控制台字符输出
+ * @param c 要输出的字符
+ */
+extern "C" auto etl_putchar(int c) -> void {
+  if (pl011_uart) {
+    pl011_uart->PutChar(c);
+  }
+}

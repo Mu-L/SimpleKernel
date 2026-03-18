@@ -2,8 +2,7 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#ifndef SIMPLEKERNEL_SRC_INCLUDE_SPINLOCK_HPP_
-#define SIMPLEKERNEL_SRC_INCLUDE_SPINLOCK_HPP_
+#pragma once
 
 #include <cpu_io.h>
 
@@ -13,7 +12,8 @@
 #include <limits>
 
 #include "expected.hpp"
-#include "sk_cstdio"
+#include "kernel_log.hpp"
+#include "kstd_cstdio"
 
 /**
  * @brief 自旋锁
@@ -27,13 +27,13 @@
 class SpinLock {
  public:
   /// 自旋锁名称
-  const char* name_{"unnamed"};
+  const char* name{"unnamed"};
 
   /**
    * @brief 获得锁
    * @return Expected<void> 成功返回空值，失败返回错误
    */
-  __always_inline auto Lock() -> Expected<void> {
+  [[nodiscard]] __always_inline auto Lock() -> Expected<void> {
     auto intr_enable = cpu_io::GetInterruptStatus();
     cpu_io::DisableInterrupt();
 
@@ -46,7 +46,8 @@ class SpinLock {
         if (intr_enable) {
           cpu_io::EnableInterrupt();
         }
-        sk_printf("spinlock %s recursive lock detected.\n", name_);
+        // klog::Err("spinlock {}: {} recursive lock detected.",
+        //           cpu_io::GetCurrentCoreId(), name);
         return std::unexpected(Error{ErrorCode::kSpinLockRecursiveLock});
       }
       cpu_io::Pause();
@@ -62,9 +63,10 @@ class SpinLock {
    * @brief 释放锁
    * @return Expected<void> 成功返回空值，失败返回错误
    */
-  __always_inline auto UnLock() -> Expected<void> {
+  [[nodiscard]] __always_inline auto UnLock() -> Expected<void> {
     if (!IsLockedByCurrentCore()) {
-      sk_printf("spinlock %s IsLockedByCurrentCore == false.\n", name_);
+      // klog::Err("spinlock {}: {} unlock by non-owner detected.",
+      //           cpu_io::GetCurrentCoreId(), name);
       return std::unexpected(Error{ErrorCode::kSpinLockNotOwned});
     }
 
@@ -79,15 +81,16 @@ class SpinLock {
     return {};
   }
 
+  /// @name 构造/析构函数
+  /// @{
+
   /**
    * @brief 构造函数
    * @param  _name            锁名
    * @note 需要堆初始化后可用
    */
-  explicit SpinLock(const char* _name) : name_(_name) {}
+  explicit SpinLock(const char* _name) : name(_name) {}
 
-  /// @name 构造/析构函数
-  /// @{
   SpinLock() = default;
   SpinLock(const SpinLock&) = delete;
   SpinLock(SpinLock&&) = default;
@@ -99,7 +102,7 @@ class SpinLock {
  protected:
   /// 是否 Lock
   std::atomic_flag locked_{ATOMIC_FLAG_INIT};
-  /// 获得此锁的 core_id_
+  /// 获得此锁的 core_id
   std::atomic<size_t> core_id_{std::numeric_limits<size_t>::max()};
   /// 保存的中断状态
   bool saved_intr_enable_{false};
@@ -110,8 +113,9 @@ class SpinLock {
    * @return false            否
    */
   __always_inline auto IsLockedByCurrentCore() -> bool {
-    return locked_.test() && (core_id_.load(std::memory_order_acquire) ==
-                              cpu_io::GetCurrentCoreId());
+    return locked_.test(std::memory_order_acquire) &&
+           (core_id_.load(std::memory_order_acquire) ==
+            cpu_io::GetCurrentCoreId());
   }
 };
 
@@ -120,40 +124,97 @@ class SpinLock {
  * @tparam Mutex 锁类型，必须有返回 Expected<void> 的 Lock() 和 UnLock() 方法
  */
 template <typename Mutex>
-requires requires(Mutex& m) {
-  { m.Lock() } -> std::same_as<Expected<void>>;
-  { m.UnLock() } -> std::same_as<Expected<void>>;
-}
+  requires requires(Mutex& m) {
+    { m.Lock() } -> std::same_as<Expected<void>>;
+    { m.UnLock() } -> std::same_as<Expected<void>>;
+  }
 class LockGuard {
  public:
   using mutex_type = Mutex;
+
+  /// @name 构造/析构函数
+  /// @{
 
   /**
    * @brief 构造函数，自动获取锁
    * @param mutex 要保护的锁对象
    */
   explicit LockGuard(mutex_type& mutex) : mutex_(mutex) {
-    if (auto result = mutex_.Lock(); !result) {
-      sk_printf("LockGuard: Failed to acquire lock: %s\n",
-                result.error().message());
+    mutex_.Lock().or_else([&](auto&& err) {
+      char core_buf[4] = {};
+      auto core_id = cpu_io::GetCurrentCoreId();
+      size_t pos = 0;
+      if (core_id == 0) {
+        core_buf[pos++] = '0';
+      } else {
+        char tmp[4] = {};
+        size_t tmp_pos = 0;
+        while (core_id > 0 && tmp_pos < sizeof(tmp)) {
+          tmp[tmp_pos++] = static_cast<char>('0' + (core_id % 10));
+          core_id /= 10;
+        }
+        while (tmp_pos > 0) {
+          core_buf[pos++] = tmp[--tmp_pos];
+        }
+      }
+      core_buf[pos] = '\0';
+      klog::RawPut("PANIC: LockGuard failed to acquire lock '");
+      klog::RawPut(mutex_.name);
+      klog::RawPut("' on core ");
+      klog::RawPut(core_buf);
+      klog::RawPut(": ");
+      klog::RawPut(err.message());
+      klog::RawPut("\n");
       while (true) {
         cpu_io::Pause();
       }
-    }
+      return Expected<void>{};
+    });
   }
 
   /**
    * @brief 析构函数，自动释放锁
    */
-  ~LockGuard() { mutex_.UnLock(); }
+  ~LockGuard() {
+    mutex_.UnLock().or_else([&](auto&& err) {
+      char core_buf[4] = {};
+      auto core_id = cpu_io::GetCurrentCoreId();
+      size_t pos = 0;
+      if (core_id == 0) {
+        core_buf[pos++] = '0';
+      } else {
+        char tmp[4] = {};
+        size_t tmp_pos = 0;
+        while (core_id > 0 && tmp_pos < sizeof(tmp)) {
+          tmp[tmp_pos++] = static_cast<char>('0' + (core_id % 10));
+          core_id /= 10;
+        }
+        while (tmp_pos > 0) {
+          core_buf[pos++] = tmp[--tmp_pos];
+        }
+      }
+      core_buf[pos] = '\0';
+      klog::RawPut("PANIC: LockGuard failed to release lock '");
+      klog::RawPut(mutex_.name);
+      klog::RawPut("' on core ");
+      klog::RawPut(core_buf);
+      klog::RawPut(": ");
+      klog::RawPut(err.message());
+      klog::RawPut("\n");
+      while (true) {
+        cpu_io::Pause();
+      }
+      return Expected<void>{};
+    });
+  }
 
+  LockGuard() = delete;
   LockGuard(const LockGuard&) = delete;
   LockGuard(LockGuard&&) = delete;
   auto operator=(const LockGuard&) -> LockGuard& = delete;
   auto operator=(LockGuard&&) -> LockGuard& = delete;
+  /// @}
 
  private:
   mutex_type& mutex_;
 };
-
-#endif /* SIMPLEKERNEL_SRC_INCLUDE_SPINLOCK_HPP_ */

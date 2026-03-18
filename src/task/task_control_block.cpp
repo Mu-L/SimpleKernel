@@ -10,26 +10,25 @@
 #include "arch.h"
 #include "basic_info.hpp"
 #include "interrupt_base.h"
+#include "kernel.h"
 #include "kernel_log.hpp"
-#include "singleton.hpp"
-#include "sk_cstring"
+#include "kstd_cstring"
 #include "sk_stdlib.h"
-#include "sk_vector"
 #include "virtual_memory.hpp"
 
 namespace {
 
-uint64_t LoadElf(const uint8_t* elf_data, uint64_t* page_table) {
+auto LoadElf(const uint8_t* elf_data, uint64_t* page_table) -> uint64_t {
   // Check ELF magic
   auto* ehdr = reinterpret_cast<const Elf64_Ehdr*>(elf_data);
   if (ehdr->e_ident[EI_MAG0] != ELFMAG0 || ehdr->e_ident[EI_MAG1] != ELFMAG1 ||
       ehdr->e_ident[EI_MAG2] != ELFMAG2 || ehdr->e_ident[EI_MAG3] != ELFMAG3) {
-    klog::Err("Invalid ELF magic\n");
+    klog::Err("Invalid ELF magic");
     return 0;
   }
 
   auto* phdr = reinterpret_cast<const Elf64_Phdr*>(elf_data + ehdr->e_phoff);
-  auto& vm = Singleton<VirtualMemory>::GetInstance();
+  auto& vm = VirtualMemorySingleton::instance();
 
   for (int i = 0; i < ehdr->e_phnum; ++i) {
     if (phdr[i].p_type != PT_LOAD) continue;
@@ -51,10 +50,10 @@ uint64_t LoadElf(const uint8_t* elf_data, uint64_t* page_table) {
       void* p_page = aligned_alloc(cpu_io::virtual_memory::kPageSize,
                                    cpu_io::virtual_memory::kPageSize);
       if (!p_page) {
-        klog::Err("Failed to allocate page for ELF\n");
+        klog::Err("Failed to allocate page for ELF");
         return 0;
       }
-      std::memset(p_page, 0, cpu_io::virtual_memory::kPageSize);
+      kstd::memset(p_page, 0, cpu_io::virtual_memory::kPageSize);
 
       // Mapping logic
       uintptr_t v_start = page;
@@ -70,80 +69,75 @@ uint64_t LoadElf(const uint8_t* elf_data, uint64_t* page_table) {
       if (copy_end > copy_start) {
         uintptr_t dst_off = copy_start - v_start;
         uintptr_t src_off = (copy_start - vaddr) + offset;
-        std::memcpy((uint8_t*)p_page + dst_off, elf_data + src_off,
-                    copy_end - copy_start);
+        kstd::memcpy(static_cast<uint8_t*>(p_page) + dst_off,
+                     elf_data + src_off, copy_end - copy_start);
       }
 
-      if (!vm.MapPage(page_table, (void*)page, p_page, flags)) {
-        klog::Err("MapPage failed\n");
+      if (!vm.MapPage(page_table, reinterpret_cast<void*>(page), p_page,
+                      flags)) {
+        klog::Err("MapPage failed");
         return 0;
       }
     }
   }
   return ehdr->e_entry;
-};
+}
 
 }  // namespace
 
-void TaskControlBlock::JoinThreadGroup(TaskControlBlock* leader) {
+auto TaskControlBlock::GetStatus() const -> etl::fsm_state_id_t {
+  return fsm.GetStateId();
+}
+
+auto TaskControlBlock::JoinThreadGroup(TaskControlBlock* leader) -> void {
   if (!leader || leader == this) {
     return;
   }
 
   // 设置 tgid
-  tgid = leader->tgid;
+  aux->tgid = leader->aux->tgid;
 
-  // 如果 leader 已经有其他线程，插入到链表头部
-  if (leader->thread_group_next) {
-    thread_group_next = leader->thread_group_next;
-    thread_group_next->thread_group_prev = this;
-  }
-  leader->thread_group_next = this;
-  thread_group_prev = leader;
+  // 在 leader 之后插入自身
+  etl::link_splice<ThreadGroupLink>(*leader, *this);
 }
 
-void TaskControlBlock::LeaveThreadGroup() {
-  // 从双向链表中移除
-  if (thread_group_prev) {
-    thread_group_prev->thread_group_next = thread_group_next;
-  }
-  if (thread_group_next) {
-    thread_group_next->thread_group_prev = thread_group_prev;
-  }
+auto TaskControlBlock::LeaveThreadGroup() -> void { ThreadGroupLink::unlink(); }
 
-  thread_group_prev = nullptr;
-  thread_group_next = nullptr;
-}
-
-size_t TaskControlBlock::GetThreadGroupSize() const {
-  if (tgid == 0) {
+auto TaskControlBlock::GetThreadGroupSize() const -> size_t {
+  if (aux->tgid == 0) {
     // 未加入任何线程组
     return 1;
   }
 
-  // 计数自己
   size_t count = 1;
 
-  // 向前遍历
-  const TaskControlBlock* curr = thread_group_prev;
+  // 向前遍历至链表头
+  const ThreadGroupLink* curr = etl_previous;
   while (curr) {
-    count++;
-    curr = curr->thread_group_prev;
+    ++count;
+    curr = curr->etl_previous;
   }
 
-  // 向后遍历
-  curr = thread_group_next;
+  // 向后遍历至链表尾
+  curr = etl_next;
   while (curr) {
-    count++;
-    curr = curr->thread_group_next;
+    ++count;
+    curr = curr->etl_next;
   }
 
   return count;
 }
 
-TaskControlBlock::TaskControlBlock(const char* name, int priority,
+TaskControlBlock::TaskControlBlock(const char* _name, int priority,
                                    ThreadEntry entry, void* arg)
-    : name(name) {
+    : name(_name) {
+  // 分配辅助数据
+  aux = new TaskAuxData{};
+  if (!aux) {
+    klog::Err("Failed to allocate TaskAuxData for task {}", name);
+    return;
+  }
+
   // 设置优先级
   sched_info.priority = priority;
   sched_info.base_priority = priority;
@@ -152,8 +146,7 @@ TaskControlBlock::TaskControlBlock(const char* name, int priority,
   kernel_stack = static_cast<uint8_t*>(aligned_alloc(
       cpu_io::virtual_memory::kPageSize, kDefaultKernelStackSize));
   if (!kernel_stack) {
-    klog::Err("Failed to allocate kernel stack for task %s\n", name);
-    status = TaskStatus::kExited;
+    klog::Err("Failed to allocate kernel stack for task {}", name);
     return;
   }
 
@@ -167,22 +160,33 @@ TaskControlBlock::TaskControlBlock(const char* name, int priority,
 
   // 初始化任务上下文
   InitTaskContext(&task_context, entry, arg, stack_top);
+
+  fsm.Start();
 }
 
-TaskControlBlock::TaskControlBlock(const char* name, int priority, uint8_t* elf,
-                                   int argc, char** argv)
-    : name(name) {
+TaskControlBlock::TaskControlBlock(const char* _name, int priority,
+                                   uint8_t* elf, int argc, char** argv)
+    : name(_name) {
+  // 分配辅助数据
+  aux = new TaskAuxData{};
+  if (!aux) {
+    klog::Err("Failed to allocate TaskAuxData for task {}", name);
+    return;
+  }
+
   // 设置优先级
   sched_info.priority = priority;
   sched_info.base_priority = priority;
 
   /// @todo
-  (void)name;
+  (void)_name;
   (void)priority;
   (void)elf;
   (void)argc;
   (void)argv;
   LoadElf(nullptr, nullptr);
+
+  fsm.Start();
 }
 
 TaskControlBlock::~TaskControlBlock() {
@@ -198,9 +202,15 @@ TaskControlBlock::~TaskControlBlock() {
   // 释放页表（如果有用户空间页表）
   if (page_table) {
     // 如果是私有页表（非共享），需要释放物理页
-    auto should_free_pages = !(clone_flags & kCloneVm);
-    Singleton<VirtualMemory>::GetInstance().DestroyPageDirectory(
-        page_table, should_free_pages);
+    auto should_free_pages = !(aux->clone_flags & clone_flag::kVm);
+    VirtualMemorySingleton::instance().DestroyPageDirectory(page_table,
+                                                            should_free_pages);
     page_table = nullptr;
+  }
+
+  // 释放辅助数据
+  if (aux) {
+    delete aux;
+    aux = nullptr;
   }
 }

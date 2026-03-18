@@ -2,22 +2,22 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
+#include <cassert>
+
 #include "kernel_log.hpp"
-#include "sk_cassert"
 #include "task_manager.hpp"
+#include "task_messages.hpp"
 
-namespace {
 /// 每秒的毫秒数
-constexpr uint64_t kMillisecondsPerSecond = 1000;
-}  // namespace
+static constexpr uint64_t kMillisecondsPerSecond = 1000;
 
-void TaskManager::Sleep(uint64_t ms) {
+auto TaskManager::Sleep(uint64_t ms) -> void {
   auto& cpu_sched = GetCurrentCpuSched();
 
   auto* current = GetCurrentTask();
-  sk_assert_msg(current != nullptr, "Sleep: No current task to sleep");
-  sk_assert_msg(current->status == TaskStatus::kRunning,
-                "Sleep: current task status must be kRunning");
+  assert(current != nullptr && "Sleep: No current task to sleep");
+  assert(current->GetStatus() == TaskStatus::kRunning &&
+         "Sleep: current task status must be kRunning");
 
   // 如果睡眠时间为 0，仅让出 CPU（相当于 yield）
   if (ms == 0) {
@@ -32,10 +32,15 @@ void TaskManager::Sleep(uint64_t ms) {
     uint64_t sleep_ticks = (ms * SIMPLEKERNEL_TICK) / kMillisecondsPerSecond;
     current->sched_info.wake_tick = cpu_sched.local_tick + sleep_ticks;
 
-    // 将任务标记为睡眠状态
-    current->status = TaskStatus::kSleeping;
+    // Check capacity before transitioning FSM
 
     // 将任务加入睡眠队列（优先队列会自动按 wake_tick 排序）
+    if (cpu_sched.sleeping_tasks.full()) {
+      klog::Err("Sleep: sleeping_tasks full, cannot sleep task {}",
+                current->pid);
+      return;
+    }
+    current->fsm.Receive(MsgSleep{current->sched_info.wake_tick});
     cpu_sched.sleeping_tasks.push(current);
   }
 

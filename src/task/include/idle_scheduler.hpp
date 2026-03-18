@@ -2,8 +2,7 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#ifndef SIMPLEKERNEL_SRC_INCLUDE_SCHEDULER_IDLE_SCHEDULER_HPP_
-#define SIMPLEKERNEL_SRC_INCLUDE_SCHEDULER_IDLE_SCHEDULER_HPP_
+#pragma once
 
 #include "scheduler_base.hpp"
 #include "task_control_block.hpp"
@@ -20,15 +19,10 @@
 class IdleScheduler : public SchedulerBase {
  public:
   /**
-   * @brief 构造函数
-   */
-  IdleScheduler() { name = "Idle"; }
-
-  /**
    * @brief 将 idle 任务加入队列
    * @param task 要加入的任务（通常只有一个 idle 任务）
    */
-  void Enqueue(TaskControlBlock* task) override {
+  auto Enqueue(TaskControlBlock* task) -> void override {
     idle_task_ = task;
     stats_.total_enqueues++;
   }
@@ -37,7 +31,7 @@ class IdleScheduler : public SchedulerBase {
    * @brief 从队列中移除任务
    * @param task 要移除的任务
    */
-  void Dequeue(TaskControlBlock* task) override {
+  auto Dequeue(TaskControlBlock* task) -> void override {
     if (idle_task_ == task) {
       idle_task_ = nullptr;
       stats_.total_dequeues++;
@@ -48,7 +42,7 @@ class IdleScheduler : public SchedulerBase {
    * @brief 选择下一个要运行的任务（返回 idle 任务）
    * @return idle 任务，如果没有则返回 nullptr
    */
-  TaskControlBlock* PickNext() override {
+  [[nodiscard]] auto PickNext() -> TaskControlBlock* override {
     if (idle_task_) {
       stats_.total_picks++;
     }
@@ -60,20 +54,25 @@ class IdleScheduler : public SchedulerBase {
    * @brief 获取队列大小
    * @return 队列大小（0 或 1）
    */
-  auto GetQueueSize() const -> size_t override { return idle_task_ ? 1 : 0; }
+  [[nodiscard]] auto GetQueueSize() const -> size_t override {
+    return idle_task_ ? 1 : 0;
+  }
 
   /**
    * @brief 判断队列是否为空
    * @return 如果没有 idle 任务则返回 true
    */
-  auto IsEmpty() const -> bool override { return idle_task_ == nullptr; }
+  [[nodiscard]] auto IsEmpty() const -> bool override {
+    return idle_task_ == nullptr;
+  }
 
   /**
    * @brief Tick 更新（idle 任务不需要时间片管理）
    * @param current 当前任务
    * @return 始终返回 false（不需要重新调度）
    */
-  auto OnTick([[maybe_unused]] TaskControlBlock* current) -> bool override {
+  [[nodiscard]] auto OnTick([[maybe_unused]] TaskControlBlock* current)
+      -> bool override {
     return false;
   }
 
@@ -82,7 +81,7 @@ class IdleScheduler : public SchedulerBase {
    * @param task 任务
    * @return 始终返回 false（不需要重新入队）
    */
-  auto OnTimeSliceExpired([[maybe_unused]] TaskControlBlock* task)
+  [[nodiscard]] auto OnTimeSliceExpired([[maybe_unused]] TaskControlBlock* task)
       -> bool override {
     return false;
   }
@@ -91,7 +90,7 @@ class IdleScheduler : public SchedulerBase {
    * @brief 任务被抢占时的处理（idle 任务不需要特殊处理）
    * @param task 被抢占的任务
    */
-  void OnPreempted([[maybe_unused]] TaskControlBlock* task) override {
+  auto OnPreempted([[maybe_unused]] TaskControlBlock* task) -> void override {
     stats_.total_preemptions++;
     // Idle 任务被抢占时不需要做任何事，它会一直保持在队列中
   }
@@ -100,18 +99,21 @@ class IdleScheduler : public SchedulerBase {
    * @brief 任务被调度时的处理（idle 任务不需要特殊处理）
    * @param task 被调度的任务
    */
-  void OnScheduled([[maybe_unused]] TaskControlBlock* task) override {
+  auto OnScheduled([[maybe_unused]] TaskControlBlock* task) -> void override {
     // Idle 任务被调度时不需要做任何事
   }
 
-  /**
-   * @brief 析构函数
-   */
-  virtual ~IdleScheduler() = default;
+  /// @name 构造/析构函数
+  /// @{
+  IdleScheduler() { name = "Idle"; }
+  IdleScheduler(const IdleScheduler&) = delete;
+  IdleScheduler(IdleScheduler&&) = delete;
+  auto operator=(const IdleScheduler&) -> IdleScheduler& = delete;
+  auto operator=(IdleScheduler&&) -> IdleScheduler& = delete;
+  ~IdleScheduler() override = default;
+  /// @}
 
  private:
   /// Idle 任务指针（通常只有一个）
-  TaskControlBlock* idle_task_ = nullptr;
+  TaskControlBlock* idle_task_{nullptr};
 };
-
-#endif /* SIMPLEKERNEL_SRC_INCLUDE_SCHEDULER_IDLE_SCHEDULER_HPP_ */

@@ -13,20 +13,18 @@
 #include "basic_info.hpp"
 #include "interrupt_base.h"
 #include "kernel.h"
-#include "singleton.hpp"
-#include "sk_cstdio"
-#include "sk_cstring"
-#include "sk_libcxx.h"
+#include "kstd_cstring"
+#include "kstd_libcxx.h"
 #include "sk_stdlib.h"
 #include "system_test.h"
 
 /// @todo 等用户态调通后补上
 auto interrupt_test() -> bool {
-  sk_printf("memory_test: start\n");
+  klog::Info("interrupt_test: start");
 
-  Singleton<Interrupt>::GetInstance().BroadcastIpi();
+  (void)InterruptSingleton::instance().BroadcastIpi();
 
-  sk_printf("memory_test: multi alloc passed\n");
+  klog::Info("interrupt_test: broadcast ipi passed");
 
   return true;
 }

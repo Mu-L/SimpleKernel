@@ -2,10 +2,10 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#ifndef SIMPLEKERNEL_SRC_INCLUDE_PER_CPU_HPP_
-#define SIMPLEKERNEL_SRC_INCLUDE_PER_CPU_HPP_
+#pragma once
 
 #include <cpu_io.h>
+#include <etl/singleton.h>
 #include <unistd.h>
 
 #include <array>
@@ -14,28 +14,27 @@
 #include <cstdint>
 #include <cstdlib>
 
-#include "singleton.hpp"
-
 struct TaskControlBlock;
 struct CpuSchedData;
 
 namespace per_cpu {
 
+/// @brief 每个 CPU 核心的局部数据
 struct PerCpu {
   /// 核心 ID
-  size_t core_id;
+  size_t core_id{0};
 
   /// 当前运行的任务
-  TaskControlBlock* running_task = nullptr;
+  TaskControlBlock* running_task{nullptr};
   /// 空闲任务
-  TaskControlBlock* idle_task = nullptr;
+  TaskControlBlock* idle_task{nullptr};
   /// 调度数据 (RunQueue) 指针
-  CpuSchedData* sched_data = nullptr;
-
-  explicit PerCpu(size_t id) : core_id(id) {}
+  CpuSchedData* sched_data{nullptr};
 
   /// @name 构造/析构函数
   /// @{
+  explicit PerCpu(size_t id) : core_id(id) {}
+
   PerCpu() = default;
   PerCpu(const PerCpu&) = default;
   PerCpu(PerCpu&&) = default;
@@ -48,11 +47,13 @@ struct PerCpu {
 static_assert(sizeof(PerCpu) <= SIMPLEKERNEL_PER_CPU_ALIGN_SIZE,
               "PerCpu size should not exceed cache line size");
 
+/// PerCpu 数组单例类型
+using PerCpuArraySingleton =
+    etl::singleton<std::array<PerCpu, SIMPLEKERNEL_MAX_CORE_COUNT>>;
+
+/// @brief 获取当前核心的 PerCpu 数据
 static __always_inline auto GetCurrentCore() -> PerCpu& {
-  return Singleton<std::array<PerCpu, SIMPLEKERNEL_MAX_CORE_COUNT>>::
-      GetInstance()[cpu_io::GetCurrentCoreId()];
+  return PerCpuArraySingleton::instance()[cpu_io::GetCurrentCoreId()];
 }
 
 }  // namespace per_cpu
-
-#endif /* SIMPLEKERNEL_SRC_INCLUDE_PER_CPU_HPP_ */

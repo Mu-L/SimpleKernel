@@ -2,8 +2,7 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#ifndef SIMPLEKERNEL_SRC_INCLUDE_KERNEL_H_
-#define SIMPLEKERNEL_SRC_INCLUDE_KERNEL_H_
+#pragma once
 
 #include <cstdint>
 
@@ -26,7 +25,13 @@ extern "C" [[maybe_unused]] [[noreturn]] void _start(int argc,
  */
 auto main(int argc, const char** argv) -> int;
 
-void MemoryInit();
-void MemoryInitSMP();
+/// @brief 内存子系统初始化
+auto MemoryInit() -> void;
+/// @brief 多核内存子系统初始化
+auto MemoryInitSMP() -> void;
 
-#endif /* SIMPLEKERNEL_SRC_INCLUDE_KERNEL_H_ */
+/// @brief 设备子系统初始化
+auto DeviceInit() -> void;
+
+/// @brief 文件系统初始化
+auto FileSystemInit() -> void;

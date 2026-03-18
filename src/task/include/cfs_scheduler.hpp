@@ -2,15 +2,16 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#ifndef SIMPLEKERNEL_SRC_INCLUDE_SCHEDULER_CFS_SCHEDULER_HPP_
-#define SIMPLEKERNEL_SRC_INCLUDE_SCHEDULER_CFS_SCHEDULER_HPP_
+#pragma once
 
+#include <etl/multiset.h>
+
+#include <cassert>
 #include <cstdint>
 
+#include "kernel_config.hpp"
+#include "kernel_log.hpp"
 #include "scheduler_base.hpp"
-#include "sk_cassert"
-#include "sk_priority_queue"
-#include "sk_vector"
 #include "task_control_block.hpp"
 
 /**
@@ -34,14 +35,17 @@ class CfsScheduler : public SchedulerBase {
   static constexpr uint64_t kMinGranularity = 10;  // 10 ticks
 
   /**
-   * @brief vruntime 比较器 (用于优先队列)
+   * @brief vruntime 比较器 (用于 multiset 红黑树)
    *
-   * 按 vruntime 从小到大排序，确保最小 vruntime 的任务在队列顶部。
+   * 按 vruntime 升序排序，确保 begin() 返回 vruntime 最小的任务。
    */
   struct VruntimeCompare {
     auto operator()(const TaskControlBlock* a, const TaskControlBlock* b) const
         -> bool {
-      return a->sched_data.cfs.vruntime > b->sched_data.cfs.vruntime;
+      if (a->sched_data.cfs.vruntime != b->sched_data.cfs.vruntime) {
+        return a->sched_data.cfs.vruntime < b->sched_data.cfs.vruntime;
+      }
+      return a < b;
     }
   };
 
@@ -51,7 +55,7 @@ class CfsScheduler : public SchedulerBase {
    *
    * 新加入的任务的 vruntime 设置为当前 min_vruntime，防止饥饿。
    */
-  void Enqueue(TaskControlBlock* task) override {
+  auto Enqueue(TaskControlBlock* task) -> void override {
     if (!task) {
       return;
     }
@@ -66,43 +70,26 @@ class CfsScheduler : public SchedulerBase {
       task->sched_data.cfs.weight = kDefaultWeight;
     }
 
-    ready_queue_.push(task);
+    if (ready_queue_.size() >= ready_queue_.max_size()) {
+      klog::Err("CfsScheduler::Enqueue: ready_queue_ full, dropping task");
+      return;
+    }
+    ready_queue_.insert(task);
     stats_.total_enqueues++;
   }
 
   /**
    * @brief 从就绪队列中移除指定任务
    * @param task 要移除的任务控制块指针
-   *
-   * 注意：优先队列不支持高效的任意元素删除，这里需要重建队列。
-   * 实际实现中建议使用红黑树替代优先队列以支持 O(log n) 删除。
    */
-  void Dequeue(TaskControlBlock* task) override {
+  auto Dequeue(TaskControlBlock* task) -> void override {
     if (!task) {
       return;
     }
 
-    // 临时向量用于重建队列
-    sk_std::vector<TaskControlBlock*> temp;
-    bool found = false;
-
-    // 将所有元素弹出，除了要删除的任务
-    while (!ready_queue_.empty()) {
-      auto* t = ready_queue_.top();
-      ready_queue_.pop();
-      if (t == task) {
-        found = true;
-      } else {
-        temp.push_back(t);
-      }
-    }
-
-    // 重建队列
-    for (auto* t : temp) {
-      ready_queue_.push(t);
-    }
-
-    if (found) {
+    auto it = ready_queue_.find(task);
+    if (it != ready_queue_.end()) {
+      ready_queue_.erase(it);
       stats_.total_dequeues++;
     }
   }
@@ -113,18 +100,18 @@ class CfsScheduler : public SchedulerBase {
    *
    * 选择 vruntime 最小的任务，实现完全公平调度。
    */
-  TaskControlBlock* PickNext() override {
+  [[nodiscard]] auto PickNext() -> TaskControlBlock* override {
     if (ready_queue_.empty()) {
       return nullptr;
     }
 
-    auto* next = ready_queue_.top();
-    ready_queue_.pop();
+    auto it = ready_queue_.begin();
+    auto* next = *it;
+    ready_queue_.erase(it);
     stats_.total_picks++;
 
-    // 更新 min_vruntime 为队列中最小的 vruntime
     if (!ready_queue_.empty()) {
-      min_vruntime_ = ready_queue_.top()->sched_data.cfs.vruntime;
+      min_vruntime_ = (*ready_queue_.begin())->sched_data.cfs.vruntime;
     } else {
       min_vruntime_ = next->sched_data.cfs.vruntime;
     }
@@ -136,13 +123,17 @@ class CfsScheduler : public SchedulerBase {
    * @brief 获取就绪队列大小
    * @return size_t 队列中的任务数量
    */
-  auto GetQueueSize() const -> size_t override { return ready_queue_.size(); }
+  [[nodiscard]] auto GetQueueSize() const -> size_t override {
+    return ready_queue_.size();
+  }
 
   /**
    * @brief 判断队列是否为空
    * @return bool 队列为空返回 true
    */
-  auto IsEmpty() const -> bool override { return ready_queue_.empty(); }
+  [[nodiscard]] auto IsEmpty() const -> bool override {
+    return ready_queue_.empty();
+  }
 
   /**
    * @brief 每个 tick 更新任务的 vruntime
@@ -153,9 +144,9 @@ class CfsScheduler : public SchedulerBase {
    * 1. 更新当前任务的 vruntime（考虑权重）
    * 2. 检查是否有 vruntime 更小的任务需要抢占
    */
-  auto OnTick(TaskControlBlock* current) -> bool override {
-    sk_assert_msg(current != nullptr,
-                  "CfsScheduler::OnTick: current task must not be null");
+  [[nodiscard]] auto OnTick(TaskControlBlock* current) -> bool override {
+    assert(current != nullptr &&
+           "CfsScheduler::OnTick: current task must not be null");
 
     // 更新 vruntime：delta = tick * (kDefaultWeight / weight)
     // 权重越大，vruntime 增长越慢，获得更多 CPU 时间
@@ -164,7 +155,7 @@ class CfsScheduler : public SchedulerBase {
 
     // 检查是否需要抢占：队列中有 vruntime 更小的任务
     if (!ready_queue_.empty()) {
-      auto* next = ready_queue_.top();
+      auto* next = *ready_queue_.begin();
       // 如果队列顶部任务的 vruntime 比当前任务小超过阈值，则需要抢占
       if (next->sched_data.cfs.vruntime + kMinGranularity <
           current->sched_data.cfs.vruntime) {
@@ -182,7 +173,7 @@ class CfsScheduler : public SchedulerBase {
    *
    * 被抢占的任务需要重新入队，保持其 vruntime。
    */
-  void OnPreempted(TaskControlBlock* task) override {
+  auto OnPreempted(TaskControlBlock* task) -> void override {
     if (task) {
       stats_.total_preemptions++;
       // CFS 不需要额外处理，Schedule() 会将任务重新入队
@@ -193,7 +184,9 @@ class CfsScheduler : public SchedulerBase {
    * @brief 获取当前 min_vruntime
    * @return uint64_t 最小虚拟运行时间
    */
-  auto GetMinVruntime() const -> uint64_t { return min_vruntime_; }
+  [[nodiscard]] auto GetMinVruntime() const -> uint64_t {
+    return min_vruntime_;
+  }
 
   /// @name 构造/析构函数
   /// @{
@@ -206,13 +199,11 @@ class CfsScheduler : public SchedulerBase {
   /// @}
 
  private:
-  /// 就绪队列 (优先队列，按 vruntime 排序)
-  sk_std::priority_queue<TaskControlBlock*, sk_std::vector<TaskControlBlock*>,
-                         VruntimeCompare>
+  /// 就绪队列 (红黑树，按 vruntime 升序排序，begin() = 最小 vruntime)
+  etl::multiset<TaskControlBlock*, kernel::config::kMaxReadyTasks,
+                VruntimeCompare>
       ready_queue_;
 
   /// 当前最小 vruntime (用于新任务初始化)
-  uint64_t min_vruntime_ = 0;
+  uint64_t min_vruntime_{0};
 };
-
-#endif /* SIMPLEKERNEL_SRC_INCLUDE_SCHEDULER_CFS_SCHEDULER_HPP_ */

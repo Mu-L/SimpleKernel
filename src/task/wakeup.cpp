@@ -2,12 +2,14 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
+#include <cassert>
+
 #include "kernel_log.hpp"
 #include "resource_id.hpp"
-#include "sk_cassert"
 #include "task_manager.hpp"
+#include "task_messages.hpp"
 
-void TaskManager::Wakeup(ResourceId resource_id) {
+auto TaskManager::Wakeup(ResourceId resource_id) -> void {
   auto& cpu_sched = GetCurrentCpuSched();
 
   LockGuard<SpinLock> lock_guard(cpu_sched.lock);
@@ -17,8 +19,9 @@ void TaskManager::Wakeup(ResourceId resource_id) {
 
   if (it == cpu_sched.blocked_tasks.end()) {
     // 没有任务等待该资源
-    klog::Debug("Wakeup: No tasks waiting on resource=%s, data=0x%lx\n",
-                resource_id.GetTypeName(), resource_id.GetData());
+    klog::Debug("Wakeup: No tasks waiting on resource={}, data={:#x}",
+                resource_id.GetTypeName(),
+                static_cast<uint64_t>(resource_id.GetData()));
     return;
   }
 
@@ -30,18 +33,19 @@ void TaskManager::Wakeup(ResourceId resource_id) {
     auto* task = waiting_tasks.front();
     waiting_tasks.pop_front();
 
-    sk_assert_msg(task->status == TaskStatus::kBlocked,
-                  "Wakeup: task status must be kBlocked");
-    sk_assert_msg(task->blocked_on == resource_id,
-                  "Wakeup: task blocked_on must match resource_id");
+    assert(task->GetStatus() == TaskStatus::kBlocked &&
+           "Wakeup: task status must be kBlocked");
+    assert(task->aux->blocked_on == resource_id &&
+           "Wakeup: task blocked_on must match resource_id");
 
     // 将任务标记为就绪
-    task->status = TaskStatus::kReady;
-    task->blocked_on = ResourceId{};
+    task->fsm.Receive(MsgWakeup{});
+    task->aux->blocked_on = ResourceId{};
 
     // 将任务重新加入对应调度器的就绪队列
-    auto* scheduler = cpu_sched.schedulers[task->policy];
-    sk_assert_msg(scheduler != nullptr, "Wakeup: scheduler must not be null");
+    auto* scheduler =
+        cpu_sched.schedulers[static_cast<uint8_t>(task->policy)].get();
+    assert(scheduler != nullptr && "Wakeup: scheduler must not be null");
     scheduler->Enqueue(task);
     wakeup_count++;
   }
@@ -49,6 +53,7 @@ void TaskManager::Wakeup(ResourceId resource_id) {
   // 移除空的资源队列
   cpu_sched.blocked_tasks.erase(resource_id);
 
-  klog::Debug("Wakeup: Woke up %zu tasks from resource=%s, data=0x%lx\n",
-              wakeup_count, resource_id.GetTypeName(), resource_id.GetData());
+  klog::Debug("Wakeup: Woke up {} tasks from resource={}, data={:#x}",
+              wakeup_count, resource_id.GetTypeName(),
+              static_cast<uint64_t>(resource_id.GetData()));
 }

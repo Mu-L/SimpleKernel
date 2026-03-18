@@ -8,114 +8,81 @@
 #include <cstdint>
 #include <cstring>
 
-#include "apic.h"
 #include "basic_info.hpp"
+#include "interrupt.h"
+#include "kernel.h"
 #include "kernel_elf.hpp"
 #include "kernel_log.hpp"
 #include "per_cpu.hpp"
-#include "singleton.hpp"
 #include "sipi.h"
-#include "sk_iostream"
 
 namespace {
 
-/// gdt 描述符表，顺序与 cpu_io::detail::register_info::GdtrInfo 中的定义一致
-std::array<cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor,
-           cpu_io::detail::register_info::GdtrInfo::kMaxCount>
+/// gdt 描述符表，顺序与 cpu_io::GdtrInfo 中的定义一致
+std::array<cpu_io::GdtrInfo::SegmentDescriptor, cpu_io::GdtrInfo::kMaxCount>
     kSegmentDescriptors = {
         // 第一个全 0
-        cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor(),
+        cpu_io::GdtrInfo::SegmentDescriptor(),
         // 内核代码段描述符
-        cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor(
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::Type::
-                kCodeExecuteRead,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::S::
-                kCodeData,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::DPL::
-                kRing0,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::P::
-                kPresent,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::AVL::
-                kNotAvailable,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::L::
-                k64Bit),
+        cpu_io::GdtrInfo::SegmentDescriptor(
+            cpu_io::GdtrInfo::SegmentDescriptor::Type::kCodeExecuteRead,
+            cpu_io::GdtrInfo::SegmentDescriptor::S::kCodeData,
+            cpu_io::GdtrInfo::SegmentDescriptor::DPL::kRing0,
+            cpu_io::GdtrInfo::SegmentDescriptor::P::kPresent,
+            cpu_io::GdtrInfo::SegmentDescriptor::AVL::kNotAvailable,
+            cpu_io::GdtrInfo::SegmentDescriptor::L::k64Bit),
         // 内核数据段描述符
-        cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor(
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::Type::
-                kDataReadWrite,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::S::
-                kCodeData,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::DPL::
-                kRing0,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::P::
-                kPresent,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::AVL::
-                kNotAvailable,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::L::
-                k64Bit),
+        cpu_io::GdtrInfo::SegmentDescriptor(
+            cpu_io::GdtrInfo::SegmentDescriptor::Type::kDataReadWrite,
+            cpu_io::GdtrInfo::SegmentDescriptor::S::kCodeData,
+            cpu_io::GdtrInfo::SegmentDescriptor::DPL::kRing0,
+            cpu_io::GdtrInfo::SegmentDescriptor::P::kPresent,
+            cpu_io::GdtrInfo::SegmentDescriptor::AVL::kNotAvailable,
+            cpu_io::GdtrInfo::SegmentDescriptor::L::k64Bit),
         // 用户代码段描述符
-        cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor(
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::Type::
-                kCodeExecuteRead,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::S::
-                kCodeData,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::DPL::
-                kRing3,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::P::
-                kPresent,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::AVL::
-                kNotAvailable,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::L::
-                k64Bit),
+        cpu_io::GdtrInfo::SegmentDescriptor(
+            cpu_io::GdtrInfo::SegmentDescriptor::Type::kCodeExecuteRead,
+            cpu_io::GdtrInfo::SegmentDescriptor::S::kCodeData,
+            cpu_io::GdtrInfo::SegmentDescriptor::DPL::kRing3,
+            cpu_io::GdtrInfo::SegmentDescriptor::P::kPresent,
+            cpu_io::GdtrInfo::SegmentDescriptor::AVL::kNotAvailable,
+            cpu_io::GdtrInfo::SegmentDescriptor::L::k64Bit),
         // 用户数据段描述符
-        cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor(
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::Type::
-                kDataReadWrite,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::S::
-                kCodeData,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::DPL::
-                kRing3,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::P::
-                kPresent,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::AVL::
-                kNotAvailable,
-            cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor::L::
-                k64Bit),
+        cpu_io::GdtrInfo::SegmentDescriptor(
+            cpu_io::GdtrInfo::SegmentDescriptor::Type::kDataReadWrite,
+            cpu_io::GdtrInfo::SegmentDescriptor::S::kCodeData,
+            cpu_io::GdtrInfo::SegmentDescriptor::DPL::kRing3,
+            cpu_io::GdtrInfo::SegmentDescriptor::P::kPresent,
+            cpu_io::GdtrInfo::SegmentDescriptor::AVL::kNotAvailable,
+            cpu_io::GdtrInfo::SegmentDescriptor::L::k64Bit),
 };
 
-cpu_io::detail::register_info::GdtrInfo::Gdtr gdtr{
-    .limit =
-        (sizeof(cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor) *
-         cpu_io::detail::register_info::GdtrInfo::kMaxCount) -
-        1,
+cpu_io::GdtrInfo::Gdtr gdtr{
+    .limit = (sizeof(cpu_io::GdtrInfo::SegmentDescriptor) *
+              cpu_io::GdtrInfo::kMaxCount) -
+             1,
     .base = kSegmentDescriptors.data(),
 };
 
 /// 设置 GDT 和段寄存器
-void SetupGdtAndSegmentRegisters() {
+auto SetupGdtAndSegmentRegisters() -> void {
   // 设置 gdt
   cpu_io::Gdtr::Write(gdtr);
 
   // 加载内核数据段描述符
-  cpu_io::Ds::Write(
-      sizeof(cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor) *
-      cpu_io::detail::register_info::GdtrInfo::kKernelDataIndex);
-  cpu_io::Es::Write(
-      sizeof(cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor) *
-      cpu_io::detail::register_info::GdtrInfo::kKernelDataIndex);
-  cpu_io::Fs::Write(
-      sizeof(cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor) *
-      cpu_io::detail::register_info::GdtrInfo::kKernelDataIndex);
-  cpu_io::Gs::Write(
-      sizeof(cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor) *
-      cpu_io::detail::register_info::GdtrInfo::kKernelDataIndex);
-  cpu_io::Ss::Write(
-      sizeof(cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor) *
-      cpu_io::detail::register_info::GdtrInfo::kKernelDataIndex);
+  cpu_io::Ds::Write(sizeof(cpu_io::GdtrInfo::SegmentDescriptor) *
+                    cpu_io::GdtrInfo::kKernelDataIndex);
+  cpu_io::Es::Write(sizeof(cpu_io::GdtrInfo::SegmentDescriptor) *
+                    cpu_io::GdtrInfo::kKernelDataIndex);
+  cpu_io::Fs::Write(sizeof(cpu_io::GdtrInfo::SegmentDescriptor) *
+                    cpu_io::GdtrInfo::kKernelDataIndex);
+  cpu_io::Gs::Write(sizeof(cpu_io::GdtrInfo::SegmentDescriptor) *
+                    cpu_io::GdtrInfo::kKernelDataIndex);
+  cpu_io::Ss::Write(sizeof(cpu_io::GdtrInfo::SegmentDescriptor) *
+                    cpu_io::GdtrInfo::kKernelDataIndex);
   // 加载内核代码段描述符
-  cpu_io::Cs::Write(
-      sizeof(cpu_io::detail::register_info::GdtrInfo::SegmentDescriptor) *
-      cpu_io::detail::register_info::GdtrInfo::kKernelCodeIndex);
+  cpu_io::Cs::Write(sizeof(cpu_io::GdtrInfo::SegmentDescriptor) *
+                    cpu_io::GdtrInfo::kKernelCodeIndex);
 }
 
 }  // namespace
@@ -135,63 +102,47 @@ BasicInfo::BasicInfo(int, const char**) {
   core_count = cpu_io::cpuid::GetLogicalProcessorCount();
 }
 
-auto ArchInit(int, const char**) -> int {
-  Singleton<BasicInfo>::GetInstance() = BasicInfo(0, nullptr);
-  sk_std::cout << Singleton<BasicInfo>::GetInstance();
+auto ArchInit(int, const char**) -> void {
+  BasicInfoSingleton::create(0, nullptr);
 
   // 解析内核 elf 信息
-  Singleton<KernelElf>::GetInstance() =
-      KernelElf(Singleton<BasicInfo>::GetInstance().elf_addr);
+  KernelElfSingleton::create(BasicInfoSingleton::instance().elf_addr);
 
   // 设置 GDT 和段寄存器
   SetupGdtAndSegmentRegisters();
 
-  // 初始化 APIC
-  Singleton<Apic>::GetInstance() =
-      Apic(Singleton<BasicInfo>::GetInstance().core_count);
-  Singleton<Apic>::GetInstance().InitCurrentCpuLocalApic().or_else(
+  klog::Info("Hello x86_64 ArchInit");
+}
+
+auto ArchInitSMP(int, const char**) -> void {
+  // 设置 GDT 和段寄存器
+  SetupGdtAndSegmentRegisters();
+
+  InterruptSingleton::instance().apic().InitCurrentCpuLocalApic().or_else(
       [](Error err) -> Expected<void> {
-        klog::Err("Failed to initialize APIC: %s\n", err.message());
+        klog::Err("Failed to initialize APIC for AP: {}", err.message());
         while (true) {
           cpu_io::Pause();
         }
         return std::unexpected(err);
       });
-
-  klog::Info("Hello x86_64 ArchInit\n");
-
-  return 0;
 }
 
-auto ArchInitSMP(int, const char**) -> int {
-  // 设置 GDT 和段寄存器
-  SetupGdtAndSegmentRegisters();
-
-  Singleton<Apic>::GetInstance().InitCurrentCpuLocalApic().or_else(
-      [](Error err) -> Expected<void> {
-        klog::Err("Failed to initialize APIC for AP: %s\n", err.message());
-        while (true) {
-          cpu_io::Pause();
-        }
-        return std::unexpected(err);
-      });
-  return 0;
-}
-
-void WakeUpOtherCores() {
+auto WakeUpOtherCores() -> void {
   // 填充 sipi_params 结构体
-  auto target_sipi_params = reinterpret_cast<sipi_params_t*>(sipi_params);
+  auto target_sipi_params = reinterpret_cast<SipiParams*>(sipi_params);
   target_sipi_params->cr3 = cpu_io::Cr3::Read();
 
-  Singleton<Apic>::GetInstance().StartupAllAps(
+  InterruptSingleton::instance().apic().StartupAllAps(
       reinterpret_cast<uint64_t>(ap_start16),
       reinterpret_cast<size_t>(ap_start64_end) -
           reinterpret_cast<size_t>(ap_start16),
       kDefaultAPBase);
 }
 
-void InitTaskContext(cpu_io::CalleeSavedContext* task_context,
-                     void (*entry)(void*), void* arg, uint64_t stack_top) {
+auto InitTaskContext(cpu_io::CalleeSavedContext* task_context,
+                     void (*entry)(void*), void* arg, uint64_t stack_top)
+    -> void {
   // 清零上下文
   std::memset(task_context, 0, sizeof(cpu_io::CalleeSavedContext));
 
@@ -202,9 +153,9 @@ void InitTaskContext(cpu_io::CalleeSavedContext* task_context,
   (void)stack_top;
 }
 
-void InitTaskContext(cpu_io::CalleeSavedContext* task_context,
-                     cpu_io::TrapContext* trap_context_ptr,
-                     uint64_t stack_top) {
+auto InitTaskContext(cpu_io::CalleeSavedContext* task_context,
+                     cpu_io::TrapContext* trap_context_ptr, uint64_t stack_top)
+    -> void {
   // 清零上下文
   std::memset(task_context, 0, sizeof(cpu_io::CalleeSavedContext));
 

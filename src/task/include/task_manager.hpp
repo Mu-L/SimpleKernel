@@ -2,10 +2,15 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#ifndef SIMPLEKERNEL_SRC_INCLUDE_TASK_MANAGER_HPP_
-#define SIMPLEKERNEL_SRC_INCLUDE_TASK_MANAGER_HPP_
+#pragma once
 
 #include <cpu_io.h>
+#include <etl/list.h>
+#include <etl/memory.h>
+#include <etl/priority_queue.h>
+#include <etl/singleton.h>
+#include <etl/unordered_map.h>
+#include <etl/vector.h>
 
 #include <MPMCQueue.hpp>
 #include <array>
@@ -14,13 +19,11 @@
 
 #include "expected.hpp"
 #include "interrupt_base.h"
+#include "kernel_config.hpp"
+#include "kstd_memory"
 #include "per_cpu.hpp"
 #include "resource_id.hpp"
 #include "scheduler_base.hpp"
-#include "sk_list"
-#include "sk_priority_queue"
-#include "sk_unordered_map"
-#include "sk_vector"
 #include "spinlock.hpp"
 #include "task_control_block.hpp"
 
@@ -31,25 +34,46 @@ struct CpuSchedData {
   SpinLock lock{"sched_lock"};
 
   /// 调度器数组 (按策略索引)
-  std::array<SchedulerBase*, SchedPolicy::kPolicyCount> schedulers{};
+  std::array<etl::unique_ptr<SchedulerBase>,
+             static_cast<uint8_t>(SchedPolicy::kPolicyCount)>
+      schedulers{};
 
   /// 睡眠队列 (优先队列，按唤醒时间排序)
-  sk_std::priority_queue<TaskControlBlock*, sk_std::vector<TaskControlBlock*>,
-                         TaskControlBlock::WakeTickCompare>
+  etl::priority_queue<
+      TaskControlBlock*, kernel::config::kMaxSleepingTasks,
+      etl::vector<TaskControlBlock*, kernel::config::kMaxSleepingTasks>,
+      TaskControlBlock::WakeTickCompare>
       sleeping_tasks;
 
   /// 阻塞队列 (按资源 ID 分组)
-  sk_std::unordered_map<ResourceId, sk_std::list<TaskControlBlock*>>
+  etl::unordered_map<
+      ResourceId,
+      etl::list<TaskControlBlock*, kernel::config::kMaxBlockedPerGroup>,
+      kernel::config::kMaxBlockedGroups,
+      kernel::config::kMaxBlockedGroupsBuckets>
       blocked_tasks;
 
   /// Per-CPU tick 计数 (每个核心独立计时)
-  uint64_t local_tick = 0;
+  uint64_t local_tick{0};
 
   /// 本核心的空闲时间 (单位: ticks)
-  uint64_t idle_time = 0;
+  uint64_t idle_time{0};
 
   /// 本核心的总调度次数
-  uint64_t total_schedules = 0;
+  uint64_t total_schedules{0};
+
+  /// Schedule() 是否已被显式调用
+  bool scheduler_started{false};
+
+  /// @name 构造/析构函数
+  /// @{
+  CpuSchedData() = default;
+  CpuSchedData(const CpuSchedData&) = delete;
+  CpuSchedData(CpuSchedData&&) = delete;
+  auto operator=(const CpuSchedData&) -> CpuSchedData& = delete;
+  auto operator=(CpuSchedData&&) -> CpuSchedData& = delete;
+  ~CpuSchedData() = default;
+  /// @}
 };
 
 /**
@@ -62,16 +86,17 @@ class TaskManager {
   /**
    * @brief 初始化 per cpu 的调度数据，创建 idle 线程
    */
-  void InitCurrentCore();
+  auto InitCurrentCore() -> void;
 
   /**
-   * @brief 添加任务
+   * @brief 添加任务（接管所有权）
    *
    * 根据任务的调度策略，将其添加到对应的调度器中。
    *
-   * @param task 任务控制块指针，状态应为 kUnInit
+   * @param task 任务控制块，所有权转移给 TaskManager
+   * @pre task 非空，状态为 kUnInit
    */
-  void AddTask(TaskControlBlock* task);
+  auto AddTask(etl::unique_ptr<TaskControlBlock> task) -> void;
 
   /**
    * @brief 调度函数
@@ -82,45 +107,45 @@ class TaskManager {
    * 主动让出 CPU (yield)
    * 任务阻塞、睡眠或退出
    */
-  void Schedule();
+  auto Schedule() -> void;
 
   /**
    * @brief 获取当前任务
    * @return TaskControlBlock* 当前正在运行的任务
    */
-  TaskControlBlock* GetCurrentTask() const {
+  [[nodiscard]] auto GetCurrentTask() const -> TaskControlBlock* {
     return per_cpu::GetCurrentCore().running_task;
   }
 
   /**
    * @brief 更新系统 tick
    */
-  void TickUpdate();
+  auto TickUpdate() -> void;
 
   /**
    * @brief 线程睡眠
    * @param ms 睡眠毫秒数
    */
-  void Sleep(uint64_t ms);
+  auto Sleep(uint64_t ms) -> void;
 
   /**
    * @brief 退出当前线程
    * @param exit_code 退出码
    */
-  [[noreturn]] void Exit(int exit_code = 0);
+  [[noreturn]] auto Exit(int exit_code = 0) -> void;
 
   /**
    * @brief 阻塞当前任务
    * @param resource_id 等待的资源 ID
    */
-  void Block(ResourceId resource_id);
+  auto Block(ResourceId resource_id) -> void;
 
   /**
    * @brief 唤醒等待指定资源的所有任务
    * @param resource_id 资源 ID
    * @note 会唤醒所有阻塞在此资源上的任务
    */
-  void Wakeup(ResourceId resource_id);
+  auto Wakeup(ResourceId resource_id) -> void;
 
   /**
    * @brief 克隆当前任务 (fork/clone 系统调用)
@@ -137,9 +162,10 @@ class TaskManager {
    * @param parent_context 父进程的 trap 上下文 (用于复制寄存器)
    * @return Expected<Pid> 父进程返回子进程 PID，子进程返回 0，失败返回错误
    */
-  Expected<Pid> Clone(uint64_t flags, void* user_stack, int* parent_tid,
-                      int* child_tid, void* tls,
-                      cpu_io::TrapContext& parent_context);
+  [[nodiscard]] auto Clone(uint64_t flags, void* user_stack, int* parent_tid,
+                           int* child_tid, void* tls,
+                           cpu_io::TrapContext& parent_context)
+      -> Expected<Pid>;
 
   /**
    * @brief 等待子进程退出
@@ -149,15 +175,15 @@ class TaskManager {
    * @param untraced 报告已停止的子进程 (类似 WUNTRACED)
    * @return Expected<Pid> 成功返回子进程 PID，无子进程或被中断返回错误
    */
-  Expected<Pid> Wait(Pid pid, int* status, bool no_hang = false,
-                     bool untraced = false);
+  [[nodiscard]] auto Wait(Pid pid, int* status, bool no_hang = false,
+                          bool untraced = false) -> Expected<Pid>;
 
   /**
    * @brief 按 PID 查找任务
    * @param pid 进程 ID
    * @return TaskControlBlock* 找到的任务，未找到返回 nullptr
    */
-  TaskControlBlock* FindTask(Pid pid);
+  [[nodiscard]] auto FindTask(Pid pid) -> TaskControlBlock*;
 
   /// @name 构造/析构函数
   /// @{
@@ -171,20 +197,23 @@ class TaskManager {
 
  private:
   /// 中断工作队列容量
-  static constexpr const size_t kInterruptQueueCapacity = 256;
+  static constexpr size_t kInterruptQueueCapacity = 256;
 
-  /// 中断线程处理结构体
+  /**
+   * @brief 中断线程处理结构体
+   */
   struct InterruptWork {
     using WorkHandler = void (*)(InterruptWork*);
 
-    // 中断号
-    uint64_t interrupt_no;
-    // 中断上下文
-    cpu_io::TrapContext* data;
-    // 时间戳
-    uint64_t timestamp;
+    /// 中断号
+    uint64_t interrupt_no{0};
+    /// 中断上下文
+    cpu_io::TrapContext* data{nullptr};
+    /// 时间戳
+    uint64_t timestamp{0};
 
-    WorkHandler handler = nullptr;
+    /// 工作处理函数
+    WorkHandler handler{nullptr};
   };
 
   /// 中断工作队列
@@ -192,46 +221,58 @@ class TaskManager {
       mpmc_queue::MPMCQueue<InterruptWork, kInterruptQueueCapacity>;
 
   /// 每个核心的调度数据
-  std::array<CpuSchedData, SIMPLEKERNEL_MAX_CORE_COUNT> cpu_schedulers_;
+  std::array<CpuSchedData, SIMPLEKERNEL_MAX_CORE_COUNT> cpu_schedulers_{};
 
   /// 全局任务表 (PID -> TCB 映射)
   SpinLock task_table_lock_{"task_table_lock"};
-  sk_std::unordered_map<Pid, TaskControlBlock*> task_table_;
+  etl::unordered_map<Pid, etl::unique_ptr<TaskControlBlock>,
+                     kernel::config::kMaxTasks,
+                     kernel::config::kMaxTasksBuckets>
+      task_table_;
 
   /// 中断线程相关数据保护锁
   SpinLock interrupt_threads_lock_{"interrupt_threads_lock"};
   /// 中断号 -> 中断线程映射
-  sk_std::unordered_map<uint64_t, TaskControlBlock*> interrupt_threads_;
+  etl::unordered_map<uint64_t, TaskControlBlock*,
+                     kernel::config::kMaxInterruptThreads,
+                     kernel::config::kMaxInterruptThreadsBuckets>
+      interrupt_threads_;
   /// 中断号 -> 工作队列映射
-  sk_std::unordered_map<uint64_t, InterruptWorkQueue*> interrupt_work_queues_;
+  etl::unordered_map<uint64_t, InterruptWorkQueue*,
+                     kernel::config::kMaxInterruptThreads,
+                     kernel::config::kMaxInterruptThreadsBuckets>
+      interrupt_work_queues_;
 
   /// PID 分配器
-  std::atomic<size_t> pid_allocator{1};
+  std::atomic<size_t> pid_allocator_{1};
 
   /**
    * @brief 分配新的 PID
    * @return size_t 新的 PID
    */
-  size_t AllocatePid();
+  [[nodiscard]] auto AllocatePid() -> size_t;
 
   /**
    * @brief 负载均衡 (空闲 core 窃取任务)
    */
-  void Balance();
+  auto Balance() -> void;
 
   /**
    * @brief 获取当前核心的调度数据
+   * @return CpuSchedData& 当前核心的调度数据引用
    */
-  CpuSchedData& GetCurrentCpuSched() {
+  [[nodiscard]] auto GetCurrentCpuSched() -> CpuSchedData& {
     return cpu_schedulers_[cpu_io::GetCurrentCoreId()];
   }
 
   /**
    * @brief 获取线程组的所有线程
    * @param tgid 线程组 ID
-   * @return sk_std::vector<TaskControlBlock*> 线程组中的所有线程
+   * @return etl::vector<TaskControlBlock*, kernel::config::kMaxReadyTasks>
+   * 线程组中的所有线程
    */
-  sk_std::vector<TaskControlBlock*> GetThreadGroup(Pid tgid);
+  auto GetThreadGroup(Pid tgid)
+      -> etl::vector<TaskControlBlock*, kernel::config::kMaxReadyTasks>;
 
   /**
    * @brief 向线程组中的所有线程发送信号
@@ -239,21 +280,21 @@ class TaskManager {
    * @param signal 信号编号
    * @note 暂未实现信号机制，预留接口
    */
-  void SignalThreadGroup(Pid tgid, int signal);
+  auto SignalThreadGroup(Pid tgid, int signal) -> void;
 
   /**
    * @brief 回收僵尸进程资源
    * @param task 要回收的任务 (必须处于 kZombie 状态)
    * @note 释放内核栈、页表、TCB，回收 PID
    */
-  void ReapTask(TaskControlBlock* task);
+  auto ReapTask(TaskControlBlock* task) -> void;
 
   /**
    * @brief 将孤儿进程过继给 init 进程
    * @param parent 退出的父进程
    * @note 在父进程退出时调用，防止子进程变成僵尸无人回收
    */
-  void ReparentChildren(TaskControlBlock* parent);
+  auto ReparentChildren(TaskControlBlock* parent) -> void;
 };
 
-#endif /* SIMPLEKERNEL_SRC_INCLUDE_TASK_MANAGER_HPP_ */
+using TaskManagerSingleton = etl::singleton<TaskManager>;

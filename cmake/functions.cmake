@@ -75,26 +75,29 @@ FUNCTION(add_run_target)
             $<TARGET_FILE_DIR:${ARG_TARGET}>/$<TARGET_FILE_NAME:${ARG_TARGET}>.bin
     )
 
+    # 生成 rootfs.img
+    ADD_CUSTOM_COMMAND (
+        OUTPUT ${CMAKE_BINARY_DIR}/bin/rootfs.img
+        COMMENT "Generating rootfs.img ..."
+        VERBATIM
+        WORKING_DIRECTORY $<TARGET_FILE_DIR:${ARG_TARGET}>
+        COMMAND dd if=/dev/zero of=${CMAKE_BINARY_DIR}/bin/rootfs.img bs=1M
+                count=64
+        COMMAND mkfs.fat -F 32 ${CMAKE_BINARY_DIR}/bin/rootfs.img)
+
     # 生成 QEMU DTS 和 DTB
     ADD_CUSTOM_COMMAND (
         OUTPUT ${CMAKE_BINARY_DIR}/bin/qemu.dtb ${CMAKE_BINARY_DIR}/bin/qemu.dts
         COMMENT "Generating QEMU DTS and DTB ..."
         VERBATIM
+        DEPENDS ${CMAKE_BINARY_DIR}/bin/rootfs.img
         WORKING_DIRECTORY $<TARGET_FILE_DIR:${ARG_TARGET}>
         COMMAND
             qemu-system-${CMAKE_SYSTEM_PROCESSOR} ${QEMU_COMMON_FLAG}
-            ${QEMU_MACHINE_FLAGS} -machine
+            ${QEMU_DEVICE_FLAGS} ${QEMU_MACHINE_FLAGS} -machine
             dumpdtb=$<TARGET_FILE_DIR:${ARG_TARGET}>/qemu.dtb
         COMMAND dtc -I dtb $<TARGET_FILE_DIR:${ARG_TARGET}>/qemu.dtb -O dts -o
                 $<TARGET_FILE_DIR:${ARG_TARGET}>/qemu.dts)
-
-    # 生成空的 qemu.log 文件
-    ADD_CUSTOM_COMMAND (
-        OUTPUT ${CMAKE_BINARY_DIR}/bin/qemu.log
-        COMMENT "Generating qemu.log ..."
-        VERBATIM
-        WORKING_DIRECTORY $<TARGET_FILE_DIR:${ARG_TARGET}>
-        COMMAND echo "" > ${CMAKE_BINARY_DIR}/bin/qemu.log)
 
     # 生成 U-BOOT FIT
     ADD_CUSTOM_TARGET (
@@ -127,17 +130,19 @@ FUNCTION(add_run_target)
         ${ARG_NAME}run
         COMMENT "Run $<TARGET_FILE_NAME:${ARG_TARGET}> ..."
         DEPENDS ${ARG_DEPENDS} ${ARG_TARGET}_gen_fit
-                ${CMAKE_BINARY_DIR}/bin/qemu.log
+                ${CMAKE_BINARY_DIR}/bin/rootfs.img
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMAND qemu-system-${CMAKE_SYSTEM_PROCESSOR} ${QEMU_COMMON_FLAG}
-                ${QEMU_MACHINE_FLAGS} ${ARG_QEMU_BOOT_FLAGS})
+        COMMAND
+            qemu-system-${CMAKE_SYSTEM_PROCESSOR} ${QEMU_COMMON_FLAG}
+            ${QEMU_DEVICE_FLAGS} ${QEMU_MACHINE_FLAGS} ${ARG_QEMU_BOOT_FLAGS})
     ADD_CUSTOM_TARGET (
         ${ARG_NAME}debug
         COMMENT "Debug $<TARGET_FILE_NAME:${ARG_TARGET}> ..."
         DEPENDS ${ARG_DEPENDS} ${ARG_TARGET}_gen_fit
-                ${CMAKE_BINARY_DIR}/bin/qemu.log
+                ${CMAKE_BINARY_DIR}/bin/rootfs.img
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMAND
             qemu-system-${CMAKE_SYSTEM_PROCESSOR} ${QEMU_COMMON_FLAG}
-            ${QEMU_MACHINE_FLAGS} ${QEMU_DEBUG_FLAGS} ${ARG_QEMU_BOOT_FLAGS})
+            ${QEMU_DEVICE_FLAGS} ${QEMU_MACHINE_FLAGS} ${QEMU_DEBUG_FLAGS}
+            ${ARG_QEMU_BOOT_FLAGS})
 ENDFUNCTION()

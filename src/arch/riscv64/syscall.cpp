@@ -6,9 +6,8 @@
 
 #include "interrupt.h"
 #include "kernel_log.hpp"
-#include "singleton.hpp"
 
-void Syscall(uint64_t, cpu_io::TrapContext* context_ptr) {
+auto Syscall(uint64_t, cpu_io::TrapContext* context_ptr) -> void {
   // 获取系统调用号和参数
   uint64_t syscall_id = 0;
   uint64_t args[6] = {0};

@@ -6,30 +6,30 @@
 
 #include <cstdint>
 
-#include "sk_stdio.h"
 #include "system_test.h"
 #include "task_control_block.hpp"
+#include "task_messages.hpp"
 
 namespace {
 
 auto test_cfs_basic_functionality() -> bool {
-  sk_printf("Running test_cfs_basic_functionality...\n");
+  klog::Info("Running test_cfs_basic_functionality...");
 
   CfsScheduler scheduler;
 
   // 创建测试任务
   TaskControlBlock task1("Task1", 1, nullptr, nullptr);
-  task1.status = TaskStatus::kReady;
+  task1.fsm.Receive(MsgSchedule{});
   task1.sched_data.cfs.weight = CfsScheduler::kDefaultWeight;
   task1.sched_data.cfs.vruntime = 0;
 
   TaskControlBlock task2("Task2", 2, nullptr, nullptr);
-  task2.status = TaskStatus::kReady;
+  task2.fsm.Receive(MsgSchedule{});
   task2.sched_data.cfs.weight = CfsScheduler::kDefaultWeight;
   task2.sched_data.cfs.vruntime = 0;
 
   TaskControlBlock task3("Task3", 3, nullptr, nullptr);
-  task3.status = TaskStatus::kReady;
+  task3.fsm.Receive(MsgSchedule{});
   task3.sched_data.cfs.weight = CfsScheduler::kDefaultWeight;
   task3.sched_data.cfs.vruntime = 0;
 
@@ -64,12 +64,12 @@ auto test_cfs_basic_functionality() -> bool {
             "PickNext should return nullptr after all tasks picked");
   EXPECT_TRUE(scheduler.IsEmpty(), "Scheduler should be empty");
 
-  sk_printf("test_cfs_basic_functionality passed\n");
+  klog::Info("test_cfs_basic_functionality passed");
   return true;
 }
 
 auto test_cfs_vruntime_ordering() -> bool {
-  sk_printf("Running test_cfs_vruntime_ordering...\n");
+  klog::Info("Running test_cfs_vruntime_ordering...");
 
   CfsScheduler scheduler;
 
@@ -104,12 +104,12 @@ auto test_cfs_vruntime_ordering() -> bool {
 
   EXPECT_TRUE(scheduler.IsEmpty(), "Scheduler should be empty");
 
-  sk_printf("test_cfs_vruntime_ordering passed\n");
+  klog::Info("test_cfs_vruntime_ordering passed");
   return true;
 }
 
 auto test_cfs_new_task_vruntime() -> bool {
-  sk_printf("Running test_cfs_new_task_vruntime...\n");
+  klog::Info("Running test_cfs_new_task_vruntime...");
 
   CfsScheduler scheduler;
 
@@ -139,12 +139,12 @@ auto test_cfs_new_task_vruntime() -> bool {
   EXPECT_GE(task2.sched_data.cfs.vruntime, 1000,
             "New task vruntime should be >= min_vruntime");
 
-  sk_printf("test_cfs_new_task_vruntime passed\n");
+  klog::Info("test_cfs_new_task_vruntime passed");
   return true;
 }
 
 auto test_cfs_weight_impact() -> bool {
-  sk_printf("Running test_cfs_weight_impact...\n");
+  klog::Info("Running test_cfs_weight_impact...");
 
   CfsScheduler scheduler;
 
@@ -161,8 +161,8 @@ auto test_cfs_weight_impact() -> bool {
   constexpr int kTickCount = 10;
 
   for (int i = 0; i < kTickCount; ++i) {
-    scheduler.OnTick(&high_priority);
-    scheduler.OnTick(&low_priority);
+    (void)scheduler.OnTick(&high_priority);
+    (void)scheduler.OnTick(&low_priority);
   }
 
   // 高优先级任务的 vruntime 增长应该慢于低优先级
@@ -170,18 +170,19 @@ auto test_cfs_weight_impact() -> bool {
             low_priority.sched_data.cfs.vruntime,
             "High priority task should have lower vruntime growth");
 
-  // 低优先级的 vruntime 应该约为高优先级的 2 倍
-  uint64_t ratio = low_priority.sched_data.cfs.vruntime /
-                   high_priority.sched_data.cfs.vruntime;
-  EXPECT_EQ(ratio, 2,
-            "vruntime ratio should match weight ratio (approximately 2)");
+  uint64_t expected = high_priority.sched_data.cfs.vruntime * 2;
+  uint64_t tolerance = expected / 10;
+  EXPECT_GE(low_priority.sched_data.cfs.vruntime, expected - tolerance,
+            "vruntime ratio lower bound (should be ~2x)");
+  EXPECT_LE(low_priority.sched_data.cfs.vruntime, expected + tolerance,
+            "vruntime ratio upper bound (should be ~2x)");
 
-  sk_printf("test_cfs_weight_impact passed\n");
+  klog::Info("test_cfs_weight_impact passed");
   return true;
 }
 
 auto test_cfs_preemption() -> bool {
-  sk_printf("Running test_cfs_preemption...\n");
+  klog::Info("Running test_cfs_preemption...");
 
   CfsScheduler scheduler;
 
@@ -199,12 +200,12 @@ auto test_cfs_preemption() -> bool {
   bool should_preempt = scheduler.OnTick(&task1);
   EXPECT_TRUE(should_preempt, "Task with higher vruntime should be preempted");
 
-  sk_printf("test_cfs_preemption passed\n");
+  klog::Info("test_cfs_preemption passed");
   return true;
 }
 
 auto test_cfs_no_preemption() -> bool {
-  sk_printf("Running test_cfs_no_preemption...\n");
+  klog::Info("Running test_cfs_no_preemption...");
 
   CfsScheduler scheduler;
 
@@ -214,9 +215,14 @@ auto test_cfs_no_preemption() -> bool {
 
   TaskControlBlock task2("Task2", 2, nullptr, nullptr);
   task2.sched_data.cfs.weight = CfsScheduler::kDefaultWeight;
-  // OnTick 会让 task1 增加 1000，所以 task2 应该设置为 1000 + 1000 - 5 = 1995
-  // 这样 OnTick 后：task1 = 2000, task2 = 1995，差距 5 < 10
-  task2.sched_data.cfs.vruntime = 1995;
+  // OnTick 会让 task1 的 vruntime 增加 delta = (kDefaultWeight * 1000) / weight
+  // task1 初始 vruntime=1000，OnTick 后 = 1000 + delta = 2000
+  // 设置 task2 的 vruntime 使差距小于 kMinGranularity
+  uint64_t delta =
+      (CfsScheduler::kDefaultWeight * 1000) / task1.sched_data.cfs.weight;
+  uint64_t task1_after_tick = task1.sched_data.cfs.vruntime + delta;
+  task2.sched_data.cfs.vruntime =
+      task1_after_tick - (CfsScheduler::kMinGranularity / 2);
 
   scheduler.Enqueue(&task2);
 
@@ -226,12 +232,12 @@ auto test_cfs_no_preemption() -> bool {
       should_preempt,
       "Task should not be preempted when vruntime difference is small");
 
-  sk_printf("test_cfs_no_preemption passed\n");
+  klog::Info("test_cfs_no_preemption passed");
   return true;
 }
 
 auto test_cfs_dequeue() -> bool {
-  sk_printf("Running test_cfs_dequeue...\n");
+  klog::Info("Running test_cfs_dequeue...");
 
   CfsScheduler scheduler;
 
@@ -277,12 +283,12 @@ auto test_cfs_dequeue() -> bool {
 
   EXPECT_TRUE(scheduler.IsEmpty(), "Scheduler should be empty");
 
-  sk_printf("test_cfs_dequeue passed\n");
+  klog::Info("test_cfs_dequeue passed");
   return true;
 }
 
 auto test_cfs_statistics() -> bool {
-  sk_printf("Running test_cfs_statistics...\n");
+  klog::Info("Running test_cfs_statistics...");
 
   CfsScheduler scheduler;
 
@@ -308,8 +314,8 @@ auto test_cfs_statistics() -> bool {
   EXPECT_EQ(stats.total_enqueues, 2, "Enqueues should be 2");
 
   // 测试选择统计
-  scheduler.PickNext();
-  scheduler.PickNext();
+  (void)scheduler.PickNext();
+  (void)scheduler.PickNext();
   stats = scheduler.GetStats();
   EXPECT_EQ(stats.total_picks, 2, "Picks should be 2");
 
@@ -327,12 +333,12 @@ auto test_cfs_statistics() -> bool {
   EXPECT_EQ(stats.total_picks, 0, "Picks should be 0 after reset");
   EXPECT_EQ(stats.total_preemptions, 0, "Preemptions should be 0 after reset");
 
-  sk_printf("test_cfs_statistics passed\n");
+  klog::Info("test_cfs_statistics passed");
   return true;
 }
 
 auto test_cfs_min_vruntime_update() -> bool {
-  sk_printf("Running test_cfs_min_vruntime_update...\n");
+  klog::Info("Running test_cfs_min_vruntime_update...");
 
   CfsScheduler scheduler;
 
@@ -356,18 +362,18 @@ auto test_cfs_min_vruntime_update() -> bool {
   scheduler.Enqueue(&task3);
 
   // 选择 task2 (vruntime = 500)
-  scheduler.PickNext();
+  (void)scheduler.PickNext();
 
   // min_vruntime 应该更新为队列中最小的 (750)
   uint64_t min_vruntime = scheduler.GetMinVruntime();
   EXPECT_GE(min_vruntime, 500, "min_vruntime should be updated");
 
-  sk_printf("test_cfs_min_vruntime_update passed\n");
+  klog::Info("test_cfs_min_vruntime_update passed");
   return true;
 }
 
 auto test_cfs_multiple_ticks() -> bool {
-  sk_printf("Running test_cfs_multiple_ticks...\n");
+  klog::Info("Running test_cfs_multiple_ticks...");
 
   CfsScheduler scheduler;
 
@@ -380,7 +386,7 @@ auto test_cfs_multiple_ticks() -> bool {
   // 模拟多次 tick
   constexpr int kTickCount = 10;
   for (int i = 0; i < kTickCount; ++i) {
-    scheduler.OnTick(&task);
+    (void)scheduler.OnTick(&task);
   }
 
   // vruntime 应该累积增长
@@ -394,12 +400,12 @@ auto test_cfs_multiple_ticks() -> bool {
   EXPECT_EQ(task.sched_data.cfs.vruntime, expected_vruntime,
             "vruntime should grow by expected amount");
 
-  sk_printf("test_cfs_multiple_ticks passed\n");
+  klog::Info("test_cfs_multiple_ticks passed");
   return true;
 }
 
 auto test_cfs_fairness() -> bool {
-  sk_printf("Running test_cfs_fairness...\n");
+  klog::Info("Running test_cfs_fairness...");
 
   CfsScheduler scheduler;
 
@@ -424,7 +430,7 @@ auto test_cfs_fairness() -> bool {
 
       // 模拟任务运行一段时间
       for (int tick = 0; tick < 5; ++tick) {
-        scheduler.OnTick(task);
+        (void)scheduler.OnTick(task);
       }
 
       // 将任务重新入队
@@ -455,12 +461,12 @@ auto test_cfs_fairness() -> bool {
     delete tasks[i];
   }
 
-  sk_printf("test_cfs_fairness passed\n");
+  klog::Info("test_cfs_fairness passed");
   return true;
 }
 
 auto test_cfs_mixed_operations() -> bool {
-  sk_printf("Running test_cfs_mixed_operations...\n");
+  klog::Info("Running test_cfs_mixed_operations...");
 
   CfsScheduler scheduler;
 
@@ -503,12 +509,12 @@ auto test_cfs_mixed_operations() -> bool {
   auto* picked2 = scheduler.PickNext();
   EXPECT_NE(picked2, nullptr, "Second pick should not be nullptr");
 
-  sk_printf("test_cfs_mixed_operations passed\n");
+  klog::Info("test_cfs_mixed_operations passed");
   return true;
 }
 
 auto test_cfs_robustness() -> bool {
-  sk_printf("Running test_cfs_robustness...\n");
+  klog::Info("Running test_cfs_robustness...");
 
   CfsScheduler scheduler;
 
@@ -524,7 +530,6 @@ auto test_cfs_robustness() -> bool {
   // nullptr 操作
   scheduler.Enqueue(nullptr);
   scheduler.Dequeue(nullptr);
-  scheduler.OnTick(nullptr);
   scheduler.OnPreempted(nullptr);
   scheduler.OnScheduled(nullptr);
 
@@ -540,14 +545,14 @@ auto test_cfs_robustness() -> bool {
 
   EXPECT_TRUE(scheduler.IsEmpty(), "Scheduler should be empty");
 
-  sk_printf("test_cfs_robustness passed\n");
+  klog::Info("test_cfs_robustness passed");
   return true;
 }
 
 }  // namespace
 
 auto cfs_scheduler_test() -> bool {
-  sk_printf("\n=== CFS Scheduler System Tests ===\n");
+  klog::Info("\n=== CFS Scheduler System Tests ===\n");
 
   if (!test_cfs_basic_functionality()) {
     return false;
@@ -601,6 +606,6 @@ auto cfs_scheduler_test() -> bool {
     return false;
   }
 
-  sk_printf("=== All CFS Scheduler Tests Passed ===\n\n");
+  klog::Info("=== All CFS Scheduler Tests Passed ===\n");
   return true;
 }

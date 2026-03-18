@@ -2,33 +2,43 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
+#include <cassert>
+
 #include "kernel_log.hpp"
 #include "resource_id.hpp"
-#include "sk_cassert"
 #include "task_manager.hpp"
+#include "task_messages.hpp"
 
-void TaskManager::Block(ResourceId resource_id) {
+auto TaskManager::Block(ResourceId resource_id) -> void {
   auto& cpu_sched = GetCurrentCpuSched();
 
   auto* current = GetCurrentTask();
-  sk_assert_msg(current != nullptr, "Block: No current task to block");
-  sk_assert_msg(current->status == TaskStatus::kRunning,
-                "Block: current task status must be kRunning");
+  assert(current != nullptr && "Block: No current task to block");
+  assert(current->GetStatus() == TaskStatus::kRunning &&
+         "Block: current task status must be kRunning");
 
   {
     LockGuard<SpinLock> lock_guard(cpu_sched.lock);
 
-    // 将任务标记为阻塞状态
-    current->status = TaskStatus::kBlocked;
+    // Check capacity before transitioning FSM
+    auto& list = cpu_sched.blocked_tasks[resource_id];
+    if (list.full()) {
+      klog::Err(
+          "Block: blocked_tasks list full for resource, cannot block task {}",
+          current->pid);
+      // Rollback: task stays kRunning, do not transition FSM
+      return;
+    }
 
-    // 记录阻塞的资源 ID
-    current->blocked_on = resource_id;
+    // Transition: kRunning -> kBlocked
+    current->fsm.Receive(MsgBlock{resource_id});
+    // Record blocked resource
+    current->aux->blocked_on = resource_id;
+    list.push_back(current);
 
-    // 将任务加入阻塞队列（按资源 ID 分组）
-    cpu_sched.blocked_tasks[resource_id].push_back(current);
-
-    klog::Debug("Block: pid=%zu blocked on resource=%s, data=0x%lx\n",
-                current->pid, resource_id.GetTypeName(), resource_id.GetData());
+    klog::Debug("Block: pid={} blocked on resource={}, data={:#x}",
+                current->pid, resource_id.GetTypeName(),
+                static_cast<uint64_t>(resource_id.GetData()));
   }
 
   // 调度到其他任务

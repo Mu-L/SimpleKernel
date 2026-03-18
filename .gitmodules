@@ -28,12 +28,18 @@
 [submodule "3rd/u-boot"]
 	path = 3rd/u-boot
 	url = https://github.com/u-boot/u-boot.git
-[submodule "3rd/nanoprintf"]
-	path = 3rd/nanoprintf
-	url = https://github.com/charlesnicholson/nanoprintf.git
 [submodule "3rd/bmalloc"]
 	path = 3rd/bmalloc
 	url = https://github.com/MRNIU/bmalloc.git
 [submodule "3rd/MPMCQueue"]
 	path = 3rd/MPMCQueue
 	url = https://github.com/MRNIU/MPMCQueue.git
+[submodule "3rd/fatfs"]
+	path = 3rd/fatfs
+	url = https://github.com/abbrev/fatfs.git
+[submodule "3rd/etl"]
+	path = 3rd/etl
+	url = https://github.com/ETLCPP/etl.git
+[submodule "3rd/EasyLogger"]
+	path = 3rd/EasyLogger
+	url = https://github.com/armink/EasyLogger.git

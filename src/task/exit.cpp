@@ -2,23 +2,25 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
+#include <cassert>
+
 #include "kernel_log.hpp"
 #include "resource_id.hpp"
-#include "sk_cassert"
 #include "task_manager.hpp"
+#include "task_messages.hpp"
 
-void TaskManager::Exit(int exit_code) {
+auto TaskManager::Exit(int exit_code) -> void {
   auto& cpu_sched = GetCurrentCpuSched();
   auto* current = GetCurrentTask();
-  sk_assert_msg(current != nullptr, "Exit: No current task to exit");
-  sk_assert_msg(current->status == TaskStatus::kRunning,
-                "Exit: current task status must be kRunning");
+  assert(current != nullptr && "Exit: No current task to exit");
+  assert(current->GetStatus() == TaskStatus::kRunning &&
+         "Exit: current task status must be kRunning");
 
   {
     LockGuard<SpinLock> lock_guard(cpu_sched.lock);
 
     // 设置退出码
-    current->exit_code = exit_code;
+    current->aux->exit_code = exit_code;
 
     // 检查是否是线程组的主线程
     bool is_group_leader = current->IsThreadGroupLeader();
@@ -26,10 +28,9 @@ void TaskManager::Exit(int exit_code) {
     // 如果是线程组的主线程，需要检查是否还有其他线程
     if (is_group_leader && current->GetThreadGroupSize() > 1) {
       klog::Warn(
-          "Exit: Thread group leader (pid=%zu, tgid=%zu) exiting, but "
-          "group still has %zu threads\n",
-          current->pid, current->tgid, current->GetThreadGroupSize());
-      /// @todo 实现信号机制后，发送 SIGKILL 给线程组中的所有线程
+          "Exit: Thread group leader (pid={}, tgid={}) exiting, but group "
+          "still has {} threads",
+          current->pid, current->aux->tgid, current->GetThreadGroupSize());
     }
 
     // 从线程组中移除
@@ -40,31 +41,35 @@ void TaskManager::Exit(int exit_code) {
       ReparentChildren(current);
     }
 
-    if (current->parent_pid != 0) {
+    if (current->aux->parent_pid != 0) {
       // 有父进程，进入僵尸状态等待回收
-      current->status = TaskStatus::kZombie;
-      /// @todo 通知父进程 (发送 SIGCHLD)
+      // Transition: kRunning -> kZombie
+      current->fsm.Receive(MsgExit{exit_code, true});
 
       // 唤醒等待此进程退出的父进程
       // 父进程会阻塞在 ChildExit 类型的资源上，数据是父进程自己的 PID
       auto wait_resource_id =
-          ResourceId(ResourceType::kChildExit, current->parent_pid);
+          ResourceId(ResourceType::kChildExit, current->aux->parent_pid);
       Wakeup(wait_resource_id);
 
-      klog::Debug("Exit: pid=%zu waking up parent=%zu on resource=%s\n",
-                  current->pid, current->parent_pid,
+      /// @todo 通知父进程 (发送 SIGCHLD)
+
+      klog::Debug("Exit: pid={} waking up parent={} on resource={}",
+                  current->pid, current->aux->parent_pid,
                   wait_resource_id.GetTypeName());
     } else {
       // 没有父进程，直接退出并释放资源
-      current->status = TaskStatus::kExited;
+      // Transition: kRunning -> kExited
+      current->fsm.Receive(MsgExit{exit_code, false});
+      // No parent to call wait(), reap immediately to free TCB + stack
       ReapTask(current);
     }
   }
 
   Schedule();
 
-  // 退出后不应执行到这里
-  klog::Err("Exit: Task %zu should not return from Schedule()\n", current->pid);
+  klog::Err("Exit: Task {} should not return from Schedule()", current->pid);
 
+  // UNREACHABLE: 任务退出后 Schedule() 不应返回
   __builtin_unreachable();
 }

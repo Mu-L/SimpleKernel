@@ -2,8 +2,7 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#ifndef SIMPLEKERNEL_SRC_ARCH_X86_64_SIPI_H_
-#define SIMPLEKERNEL_SRC_ARCH_X86_64_SIPI_H_
+#pragma once
 
 #include <sys/cdefs.h>
 
@@ -11,14 +10,15 @@
 #include <cstdint>
 
 /// 启动 APs 的默认地址
-static constexpr uint64_t kDefaultAPBase = 0x30000;
+inline constexpr uint64_t kDefaultAPBase = 0x30000;
 
-extern "C" void *ap_start16[];
-extern "C" void *ap_start64_end[];
-extern "C" void *sipi_params[];
+extern "C" void* ap_start16[];
+extern "C" void* ap_start64_end[];
+extern "C" void* sipi_params[];
 
-struct sipi_params_t {
+/**
+ * @brief SIPI 参数结构体
+ */
+struct [[gnu::packed]] SipiParams {
   uint32_t cr3;
-} __attribute__((packed));
-
-#endif /* SIMPLEKERNEL_SRC_ARCH_X86_64_SIPI_H_ */
+};

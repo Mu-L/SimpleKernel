@@ -2,11 +2,12 @@
  * @copyright Copyright The SimpleKernel Contributors
  */
 
-#ifndef SIMPLEKERNEL_SRC_INCLUDE_KERNEL_ELF_HPP_
-#define SIMPLEKERNEL_SRC_INCLUDE_KERNEL_ELF_HPP_
+#pragma once
 
 #include <elf.h>
+#include <etl/singleton.h>
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -14,31 +15,38 @@
 
 #include "expected.hpp"
 #include "kernel_log.hpp"
-#include "singleton.hpp"
-#include "sk_cassert"
 
 /**
- * elf 文件相关
+ * @brief ELF 文件相关
  */
 class KernelElf {
  public:
   /// 符号表
-  std::span<Elf64_Sym> symtab_;
+  std::span<Elf64_Sym> symtab{};
   /// 字符串表
-  uint8_t* strtab_ = nullptr;
+  uint8_t* strtab{nullptr};
 
   /**
-   * 构造函数
+   * @brief 获取 elf 文件大小
+   * @return elf 文件大小
+   */
+  [[nodiscard]] auto GetElfSize() const -> size_t { return elf_.size(); }
+
+  /// @name 构造/析构函数
+  /// @{
+
+  /**
+   * @brief 构造函数
    * @param elf_addr elf 地址
    */
   explicit KernelElf(uint64_t elf_addr) {
-    sk_assert_msg(elf_addr != 0U, "Invalid elf_addr[0x%lX].\n", elf_addr);
+    assert(elf_addr != 0U && "elf_addr is null");
 
     elf_ = std::span<uint8_t>(reinterpret_cast<uint8_t*>(elf_addr), EI_NIDENT);
 
     // 检查 elf 头数据
     CheckElfIdentity().or_else([](Error err) -> Expected<void> {
-      klog::Err("KernelElf NOT valid ELF file: %s\n", err.message());
+      klog::Err("KernelElf NOT valid ELF file: {}", err.message());
       while (true) {
         cpu_io::Pause();
       }
@@ -82,21 +90,16 @@ class KernelElf {
     const auto* shstrtab = reinterpret_cast<const char*>(elf_.data()) +
                            shdr_[ehdr_.e_shstrndx].sh_offset;
     for (auto shdr : shdr_) {
-#ifdef SIMPLEKERNEL_DEBUG
-      klog::Debug("sh_name: [%s]\n", shstrtab + shdr.sh_name);
-#endif
       if (strcmp(shstrtab + shdr.sh_name, ".symtab") == 0) {
-        symtab_ = std::span<Elf64_Sym>(
+        symtab = std::span<Elf64_Sym>(
             reinterpret_cast<Elf64_Sym*>(elf_.data() + shdr.sh_offset),
             (shdr.sh_size / sizeof(Elf64_Sym)));
       } else if (strcmp(shstrtab + shdr.sh_name, ".strtab") == 0) {
-        strtab_ = elf_.data() + shdr.sh_offset;
+        strtab = elf_.data() + shdr.sh_offset;
       }
     }
   }
 
-  /// @name 构造/析构函数
-  /// @{
   KernelElf() = default;
   KernelElf(const KernelElf&) = default;
   KernelElf(KernelElf&&) = default;
@@ -105,19 +108,13 @@ class KernelElf {
   ~KernelElf() = default;
   /// @}
 
-  /**
-   * 获取 elf 文件大小
-   * @return elf 文件大小
-   */
-  [[nodiscard]] auto GetElfSize() const -> size_t { return elf_.size(); }
-
  protected:
   /// @name elf 文件相关
   /// @{
-  std::span<uint8_t> elf_;
-  Elf64_Ehdr ehdr_ = {};
-  std::span<Elf64_Phdr> phdr_;
-  std::span<Elf64_Shdr> shdr_;
+  std::span<uint8_t> elf_{};
+  Elf64_Ehdr ehdr_{};
+  std::span<Elf64_Phdr> phdr_{};
+  std::span<Elf64_Shdr> shdr_{};
   /// @}
 
   /**
@@ -154,4 +151,4 @@ class KernelElf {
   }
 };
 
-#endif /* SIMPLEKERNEL_SRC_INCLUDE_KERNEL_ELF_HPP_ */
+using KernelElfSingleton = etl::singleton<KernelElf>;

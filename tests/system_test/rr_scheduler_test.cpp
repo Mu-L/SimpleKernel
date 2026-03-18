@@ -6,26 +6,26 @@
 
 #include <cstdint>
 
-#include "sk_stdio.h"
 #include "system_test.h"
 #include "task_control_block.hpp"
+#include "task_messages.hpp"
 
 namespace {
 
 auto test_rr_basic_functionality() -> bool {
-  sk_printf("Running test_rr_basic_functionality...\n");
+  klog::Info("Running test_rr_basic_functionality...");
 
   RoundRobinScheduler scheduler;
 
   // 创建测试任务
   TaskControlBlock task1("Task1", 1, nullptr, nullptr);
-  task1.status = TaskStatus::kReady;
+  task1.fsm.Receive(MsgSchedule{});
 
   TaskControlBlock task2("Task2", 2, nullptr, nullptr);
-  task2.status = TaskStatus::kReady;
+  task2.fsm.Receive(MsgSchedule{});
 
   TaskControlBlock task3("Task3", 3, nullptr, nullptr);
-  task3.status = TaskStatus::kReady;
+  task3.fsm.Receive(MsgSchedule{});
 
   // 测试空队列
   EXPECT_TRUE(scheduler.IsEmpty(), "Scheduler should be empty initially");
@@ -57,18 +57,21 @@ auto test_rr_basic_functionality() -> bool {
   EXPECT_EQ(scheduler.PickNext(), nullptr,
             "PickNext should return nullptr after all tasks picked");
 
-  sk_printf("test_rr_basic_functionality passed\n");
+  klog::Info("test_rr_basic_functionality passed");
   return true;
 }
 
 auto test_rr_round_robin_behavior() -> bool {
-  sk_printf("Running test_rr_round_robin_behavior...\n");
+  klog::Info("Running test_rr_round_robin_behavior...");
 
   RoundRobinScheduler scheduler;
 
   TaskControlBlock task1("Task1", 1, nullptr, nullptr);
+  task1.fsm.Receive(MsgSchedule{});
   TaskControlBlock task2("Task2", 2, nullptr, nullptr);
+  task2.fsm.Receive(MsgSchedule{});
   TaskControlBlock task3("Task3", 3, nullptr, nullptr);
+  task3.fsm.Receive(MsgSchedule{});
 
   // 第一轮
   scheduler.Enqueue(&task1);
@@ -90,16 +93,17 @@ auto test_rr_round_robin_behavior() -> bool {
 
   EXPECT_TRUE(scheduler.IsEmpty(), "Scheduler should be empty after 2 rounds");
 
-  sk_printf("test_rr_round_robin_behavior passed\n");
+  klog::Info("test_rr_round_robin_behavior passed");
   return true;
 }
 
 auto test_rr_time_slice_management() -> bool {
-  sk_printf("Running test_rr_time_slice_management...\n");
+  klog::Info("Running test_rr_time_slice_management...");
 
   RoundRobinScheduler scheduler;
 
   TaskControlBlock task1("Task1", 1, nullptr, nullptr);
+  task1.fsm.Receive(MsgSchedule{});
   task1.sched_info.time_slice_default = 20;
   task1.sched_info.time_slice_remaining = 5;  // 时间片快用完了
 
@@ -119,19 +123,23 @@ auto test_rr_time_slice_management() -> bool {
   EXPECT_EQ(task1.sched_info.time_slice_remaining, 20,
             "OnTimeSliceExpired should reset time slice");
 
-  sk_printf("test_rr_time_slice_management passed\n");
+  klog::Info("test_rr_time_slice_management passed");
   return true;
 }
 
 auto test_rr_dequeue() -> bool {
-  sk_printf("Running test_rr_dequeue...\n");
+  klog::Info("Running test_rr_dequeue...");
 
   RoundRobinScheduler scheduler;
 
   TaskControlBlock task1("Task1", 1, nullptr, nullptr);
+  task1.fsm.Receive(MsgSchedule{});
   TaskControlBlock task2("Task2", 2, nullptr, nullptr);
+  task2.fsm.Receive(MsgSchedule{});
   TaskControlBlock task3("Task3", 3, nullptr, nullptr);
+  task3.fsm.Receive(MsgSchedule{});
   TaskControlBlock task4("Task4", 4, nullptr, nullptr);
+  task4.fsm.Receive(MsgSchedule{});
 
   scheduler.Enqueue(&task1);
   scheduler.Enqueue(&task2);
@@ -159,12 +167,12 @@ auto test_rr_dequeue() -> bool {
 
   EXPECT_TRUE(scheduler.IsEmpty(), "Scheduler should be empty");
 
-  sk_printf("test_rr_dequeue passed\n");
+  klog::Info("test_rr_dequeue passed");
   return true;
 }
 
 auto test_rr_statistics() -> bool {
-  sk_printf("Running test_rr_statistics...\n");
+  klog::Info("Running test_rr_statistics...");
 
   RoundRobinScheduler scheduler;
 
@@ -185,8 +193,8 @@ auto test_rr_statistics() -> bool {
   EXPECT_EQ(stats.total_enqueues, 2, "Enqueues should be 2");
 
   // 测试选择统计
-  scheduler.PickNext();
-  scheduler.PickNext();
+  (void)scheduler.PickNext();
+  (void)scheduler.PickNext();
   stats = scheduler.GetStats();
   EXPECT_EQ(stats.total_picks, 2, "Picks should be 2");
 
@@ -210,12 +218,12 @@ auto test_rr_statistics() -> bool {
   EXPECT_EQ(stats.total_picks, 0, "Picks should be 0 after reset");
   EXPECT_EQ(stats.total_preemptions, 0, "Preemptions should be 0 after reset");
 
-  sk_printf("test_rr_statistics passed\n");
+  klog::Info("test_rr_statistics passed");
   return true;
 }
 
 auto test_rr_fairness() -> bool {
-  sk_printf("Running test_rr_fairness...\n");
+  klog::Info("Running test_rr_fairness...");
 
   RoundRobinScheduler scheduler;
   constexpr size_t kTaskCount = 50;
@@ -224,7 +232,7 @@ auto test_rr_fairness() -> bool {
   // 初始化任务
   for (size_t i = 0; i < kTaskCount; ++i) {
     tasks[i] = new TaskControlBlock("Task", 10, nullptr, nullptr);
-    tasks[i]->status = TaskStatus::kReady;
+    tasks[i]->fsm.Receive(MsgSchedule{});
     scheduler.Enqueue(tasks[i]);
   }
 
@@ -245,20 +253,25 @@ auto test_rr_fairness() -> bool {
     delete tasks[i];
   }
 
-  sk_printf("test_rr_fairness passed\n");
+  klog::Info("test_rr_fairness passed");
   return true;
 }
 
 auto test_rr_mixed_operations() -> bool {
-  sk_printf("Running test_rr_mixed_operations...\n");
+  klog::Info("Running test_rr_mixed_operations...");
 
   RoundRobinScheduler scheduler;
 
   TaskControlBlock task1("Task1", 1, nullptr, nullptr);
+  task1.fsm.Receive(MsgSchedule{});
   TaskControlBlock task2("Task2", 2, nullptr, nullptr);
+  task2.fsm.Receive(MsgSchedule{});
   TaskControlBlock task3("Task3", 3, nullptr, nullptr);
+  task3.fsm.Receive(MsgSchedule{});
   TaskControlBlock task4("Task4", 4, nullptr, nullptr);
+  task4.fsm.Receive(MsgSchedule{});
   TaskControlBlock task5("Task5", 5, nullptr, nullptr);
+  task5.fsm.Receive(MsgSchedule{});
 
   // 复杂的混合操作序列
   scheduler.Enqueue(&task1);
@@ -286,18 +299,21 @@ auto test_rr_mixed_operations() -> bool {
 
   EXPECT_TRUE(scheduler.IsEmpty(), "Scheduler should be empty");
 
-  sk_printf("test_rr_mixed_operations passed\n");
+  klog::Info("test_rr_mixed_operations passed");
   return true;
 }
 
 auto test_rr_multiple_rounds() -> bool {
-  sk_printf("Running test_rr_multiple_rounds...\n");
+  klog::Info("Running test_rr_multiple_rounds...");
 
   RoundRobinScheduler scheduler;
 
   TaskControlBlock task1("Task1", 1, nullptr, nullptr);
+  task1.fsm.Receive(MsgSchedule{});
   TaskControlBlock task2("Task2", 2, nullptr, nullptr);
+  task2.fsm.Receive(MsgSchedule{});
   TaskControlBlock task3("Task3", 3, nullptr, nullptr);
+  task3.fsm.Receive(MsgSchedule{});
 
   // 进行 5 轮时间片轮转
   for (int round = 0; round < 5; ++round) {
@@ -311,16 +327,17 @@ auto test_rr_multiple_rounds() -> bool {
     EXPECT_TRUE(scheduler.IsEmpty(), "Queue should be empty after each round");
   }
 
-  sk_printf("test_rr_multiple_rounds passed\n");
+  klog::Info("test_rr_multiple_rounds passed");
   return true;
 }
 
 auto test_rr_hooks() -> bool {
-  sk_printf("Running test_rr_hooks...\n");
+  klog::Info("Running test_rr_hooks...");
 
   RoundRobinScheduler scheduler;
 
   TaskControlBlock task1("Task1", 1, nullptr, nullptr);
+  task1.fsm.Receive(MsgSchedule{});
   task1.sched_info.priority = 5;
 
   // 测试各种钩子函数不会崩溃
@@ -342,16 +359,17 @@ auto test_rr_hooks() -> bool {
   auto* picked = scheduler.PickNext();
   EXPECT_EQ(picked, &task1, "Scheduler should still work after hook calls");
 
-  sk_printf("test_rr_hooks passed\n");
+  klog::Info("test_rr_hooks passed");
   return true;
 }
 
 auto test_rr_robustness() -> bool {
-  sk_printf("Running test_rr_robustness...\n");
+  klog::Info("Running test_rr_robustness...");
 
   RoundRobinScheduler scheduler;
 
   TaskControlBlock task1("Task1", 1, nullptr, nullptr);
+  task1.fsm.Receive(MsgSchedule{});
 
   // 空队列操作
   EXPECT_EQ(scheduler.PickNext(), nullptr,
@@ -369,18 +387,21 @@ auto test_rr_robustness() -> bool {
   scheduler.Dequeue(nullptr);  // 不应崩溃
   EXPECT_TRUE(scheduler.IsEmpty(), "Scheduler should still be empty");
 
-  sk_printf("test_rr_robustness passed\n");
+  klog::Info("test_rr_robustness passed");
   return true;
 }
 
 auto test_rr_interleaved_operations() -> bool {
-  sk_printf("Running test_rr_interleaved_operations...\n");
+  klog::Info("Running test_rr_interleaved_operations...");
 
   RoundRobinScheduler scheduler;
 
   TaskControlBlock task1("Task1", 1, nullptr, nullptr);
+  task1.fsm.Receive(MsgSchedule{});
   TaskControlBlock task2("Task2", 2, nullptr, nullptr);
+  task2.fsm.Receive(MsgSchedule{});
   TaskControlBlock task3("Task3", 3, nullptr, nullptr);
+  task3.fsm.Receive(MsgSchedule{});
 
   // 交替的入队和出队操作
   scheduler.Enqueue(&task1);
@@ -401,14 +422,14 @@ auto test_rr_interleaved_operations() -> bool {
 
   EXPECT_TRUE(scheduler.IsEmpty(), "Scheduler should be empty");
 
-  sk_printf("test_rr_interleaved_operations passed\n");
+  klog::Info("test_rr_interleaved_operations passed");
   return true;
 }
 
 }  // namespace
 
 auto rr_scheduler_test() -> bool {
-  sk_printf("\n=== Round-Robin Scheduler System Tests ===\n");
+  klog::Info("\n=== Round-Robin Scheduler System Tests ===\n");
 
   if (!test_rr_basic_functionality()) {
     return false;
@@ -454,6 +475,6 @@ auto rr_scheduler_test() -> bool {
     return false;
   }
 
-  sk_printf("=== All Round-Robin Scheduler Tests Passed ===\n\n");
+  klog::Info("=== All Round-Robin Scheduler Tests Passed ===\n");
   return true;
 }

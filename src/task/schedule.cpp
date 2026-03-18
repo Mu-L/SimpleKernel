@@ -5,6 +5,7 @@
 #include <cpu_io.h>
 
 #include <algorithm>
+#include <cassert>
 #include <memory>
 #include <new>
 
@@ -14,28 +15,34 @@
 #include "interrupt_base.h"
 #include "kernel_elf.hpp"
 #include "kernel_log.hpp"
+#include "kstd_cstring"
 #include "per_cpu.hpp"
-#include "singleton.hpp"
-#include "sk_cassert"
-#include "sk_cstring"
 #include "sk_stdlib.h"
-#include "sk_vector"
 #include "spinlock.hpp"
 #include "task_manager.hpp"
+#include "task_messages.hpp"
 #include "virtual_memory.hpp"
 
-void TaskManager::Schedule() {
+auto TaskManager::Schedule() -> void {
   auto& cpu_sched = GetCurrentCpuSched();
-  cpu_sched.lock.Lock();
+  cpu_sched.scheduler_started = true;
+  cpu_sched.lock.Lock().or_else([](auto&& err) {
+    klog::Err("Schedule: Failed to acquire lock: {}", err.message());
+    while (true) {
+      cpu_io::Pause();
+    }
+    return Expected<void>{};
+  });
 
   auto* current = GetCurrentTask();
-  sk_assert_msg(current != nullptr, "Schedule: No current task to schedule");
+  assert(current != nullptr && "Schedule: No current task to schedule");
 
   // 处理当前任务状态
-  if (current->status == TaskStatus::kRunning) {
+  if (current->GetStatus() == TaskStatus::kRunning) {
     // 将当前任务标记为就绪并重新入队（如果它还能运行）
-    current->status = TaskStatus::kReady;
-    auto* scheduler = cpu_sched.schedulers[current->policy];
+    current->fsm.Receive(MsgYield{});
+    auto* scheduler =
+        cpu_sched.schedulers[static_cast<uint8_t>(current->policy)].get();
 
     if (scheduler) {
       scheduler->OnPreempted(current);
@@ -49,7 +56,7 @@ void TaskManager::Schedule() {
 
   // 选择下一个任务 (按策略优先级: RealTime > Normal > Idle)
   TaskControlBlock* next = nullptr;
-  for (auto* scheduler : cpu_sched.schedulers) {
+  for (auto& scheduler : cpu_sched.schedulers) {
     if (scheduler && !scheduler->IsEmpty()) {
       next = scheduler->PickNext();
       if (next) {
@@ -61,30 +68,37 @@ void TaskManager::Schedule() {
   // 如果没有任务可运行
   if (!next) {
     // 如果当前任务仍然可以运行，继续运行它
-    if (current->status == TaskStatus::kReady) {
+    if (current->GetStatus() == TaskStatus::kReady) {
       next = current;
     } else {
       // 否则统计空闲时间并返回
       cpu_sched.idle_time++;
-      cpu_sched.lock.UnLock();
+      cpu_sched.lock.UnLock().or_else([](auto&& err) {
+        klog::Err("Schedule: Failed to release lock: {}", err.message());
+        while (true) {
+          cpu_io::Pause();
+        }
+        return Expected<void>{};
+      });
       return;
     }
   }
 
   // 切换到下一个任务
-  sk_assert_msg(next != nullptr, "Schedule: next task must not be null");
-  sk_assert_msg(
-      next->status == TaskStatus::kReady || next->policy == SchedPolicy::kIdle,
-      "Schedule: next task must be kReady or kIdle policy");
+  assert(next != nullptr && "Schedule: next task must not be null");
+  assert((next->GetStatus() == TaskStatus::kReady ||
+          next->policy == SchedPolicy::kIdle) &&
+         "Schedule: next task must be kReady or kIdle policy");
 
-  next->status = TaskStatus::kRunning;
+  next->fsm.Receive(MsgSchedule{});
   // 重置时间片（对于 RR 和 FIFO 有效，CFS 使用 vruntime 不依赖此字段）
   next->sched_info.time_slice_remaining = next->sched_info.time_slice_default;
   next->sched_info.context_switches++;
   cpu_sched.total_schedules++;
 
   // 调用调度器钩子
-  auto* scheduler = cpu_sched.schedulers[next->policy];
+  auto* scheduler =
+      cpu_sched.schedulers[static_cast<uint8_t>(next->policy)].get();
   if (scheduler) {
     scheduler->OnScheduled(next);
   }
@@ -92,7 +106,13 @@ void TaskManager::Schedule() {
   // 更新 per-CPU running_task
   per_cpu::GetCurrentCore().running_task = next;
 
-  cpu_sched.lock.UnLock();
+  cpu_sched.lock.UnLock().or_else([](auto&& err) {
+    klog::Err("Schedule: Failed to release lock: {}", err.message());
+    while (true) {
+      cpu_io::Pause();
+    }
+    return Expected<void>{};
+  });
 
   // 上下文切换
   if (current != next) {

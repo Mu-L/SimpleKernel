@@ -45,7 +45,7 @@
       "cacheVariables": {
         "CMAKE_VERBOSE_MAKEFILE": {
           "type": "BOOL",
-          "value": "TRUE"
+          "value": "FALSE"
         },
         "CMAKE_EXPORT_COMPILE_COMMANDS": {
           "type": "BOOL",
@@ -81,7 +81,11 @@
         },
         "QEMU_COMMON_FLAG": {
           "type": "STRING",
-          "value": "-nographic;-serial;stdio;-monitor;telnet::2333,server,nowait;-m;1024M;-smp;2;-netdev;user,id=net0,tftp=/srv/tftp;-device;e1000,netdev=net0;-d;guest_errors,int,cpu_reset"
+          "value": "-nographic;-serial;stdio;-monitor;telnet::2333,server,nowait;-m;1024M;-smp;2;-d;guest_errors,int,cpu_reset"
+        },
+        "QEMU_DEVICE_FLAGS": {
+          "type": "STRING",
+          "value": "-global;virtio-mmio.force-legacy=false;-netdev;user,id=net0,tftp=/srv/tftp;-device;e1000,netdev=net0;-device;virtio-gpu-device"
         },
         "KERNEL_ELF_OUTPUT_NAME": {
           "type": "STRING",
@@ -93,7 +97,7 @@
         },
         "SIMPLEKERNEL_DEFAULT_STACK_SIZE": {
           "type": "STRING",
-          "value": "4096"
+          "value": "16384"
         },
         "SIMPLEKERNEL_TICK": {
           "type": "STRING",
@@ -122,11 +126,11 @@
         },
         "LIBRARY_OUTPUT_PATH": {
           "type": "STRING",
-          "value": "${sourceDir}/build_x86_64/bin"
+          "value": "${sourceDir}/build_x86_64/lib"
         },
         "QEMU_MACHINE_FLAGS": {
           "type": "STRING",
-          "value": ""
+          "value": "-drive;file=${sourceDir}/build_x86_64/bin/rootfs.img,if=none,format=raw,id=hd0;-device;virtio-blk-device,drive=hd0"
         },
         "SIMPLEKERNEL_EARLY_CONSOLE_BASE": {
           "type": "STRING",
@@ -159,7 +163,7 @@
         },
         "LIBRARY_OUTPUT_PATH": {
           "type": "STRING",
-          "value": "${sourceDir}/build_riscv64/bin"
+          "value": "${sourceDir}/build_riscv64/lib"
         },
         "USE_NO_RELAX": {
           "type": "BOOL",
@@ -167,7 +171,7 @@
         },
         "QEMU_MACHINE_FLAGS": {
           "type": "STRING",
-          "value": "-machine;virt"
+          "value": "-machine;virt;-cpu;max;-drive;file=${sourceDir}/build_riscv64/bin/rootfs.img,if=none,format=raw,id=hd0;-device;virtio-blk-device,drive=hd0"
         },
         "SIMPLEKERNEL_EARLY_CONSOLE_BASE": {
           "type": "STRING",
@@ -200,11 +204,11 @@
         },
         "LIBRARY_OUTPUT_PATH": {
           "type": "STRING",
-          "value": "${sourceDir}/build_aarch64/bin"
+          "value": "${sourceDir}/build_aarch64/lib"
         },
         "QEMU_MACHINE_FLAGS": {
           "type": "STRING",
-          "value": "-machine;virt,secure=on,gic_version=3;-cpu;cortex-a72"
+          "value": "-machine;virt,secure=on,gic_version=3;-cpu;cortex-a72;-drive;file=${sourceDir}/build_aarch64/bin/rootfs.img,if=none,format=raw,id=hd0;-device;virtio-blk-device,drive=hd0"
         },
         "SIMPLEKERNEL_EARLY_CONSOLE_BASE": {
           "type": "STRING",

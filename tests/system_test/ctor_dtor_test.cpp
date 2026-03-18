@@ -9,9 +9,8 @@
 #include "arch.h"
 #include "basic_info.hpp"
 #include "kernel.h"
-#include "sk_cstdio"
-#include "sk_cstring"
-#include "sk_libcxx.h"
+#include "kstd_cstring"
+#include "kstd_libcxx.h"
 #include "system_test.h"
 
 template <uint32_t V>
@@ -66,7 +65,7 @@ auto ctor_dtor_test() -> bool {
   cpu_io::SetupFpu();
 #endif
 
-  sk_printf("Running C++ Runtime Tests...\n");
+  klog::Info("Running C++ Runtime Tests...");
 
   // 1. Verify Global Initialization
   EXPECT_EQ(global_value_with_init, 42, "Global int init");
@@ -110,7 +109,7 @@ auto ctor_dtor_test() -> bool {
   inst_class_static.Func();
   EXPECT_EQ(inst_class_static.val, 'C', "Static local object virtual func");
 
-  sk_printf("PASS: All C++ Runtime Tests passed.\n");
+  klog::Info("PASS: All C++ Runtime Tests passed.");
 
   return true;
 }

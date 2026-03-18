@@ -71,3 +71,7 @@ void InitTaskContext(cpu_io::CalleeSavedContext* task_context,
   task_context->EntryArgument() = reinterpret_cast<uint64_t>(trap_context_ptr);
   task_context->StackPointer() = stack_top;
 }
+
+#include <stdio.h>
+
+extern "C" void etl_putchar(int c) { putchar(c); }

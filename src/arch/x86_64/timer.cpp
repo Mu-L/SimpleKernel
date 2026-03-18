@@ -7,8 +7,7 @@
 #include "arch.h"
 #include "basic_info.hpp"
 #include "interrupt.h"
-#include "singleton.hpp"
 
-void TimerInitSMP() {}
+auto TimerInitSMP() -> void {}
 
-void TimerInit() {}
+auto TimerInit() -> void {}
