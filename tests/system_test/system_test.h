@@ -4,12 +4,15 @@
 
 #pragma once
 
+#include <cpu_io.h>
 #include <etl/vector.h>
 
 #include <cstdint>
 #include <type_traits>
 
+#include "kernel.h"
 #include "kernel_log.hpp"
+#include "virtual_memory.hpp"
 
 // ===========================================================================
 // Assertion helpers
@@ -177,16 +180,24 @@ auto fifo_scheduler_test() -> bool;
 auto rr_scheduler_test() -> bool;
 auto cfs_scheduler_test() -> bool;
 auto idle_scheduler_test() -> bool;
-auto thread_group_system_test() -> bool;
-auto wait_system_test() -> bool;
-auto clone_system_test() -> bool;
-auto exit_system_test() -> bool;
-auto ramfs_system_test() -> bool;
-auto fatfs_system_test() -> bool;
+auto thread_group_test() -> bool;
+auto wait_test() -> bool;
+auto clone_test() -> bool;
+auto exit_test() -> bool;
+auto ramfs_test() -> bool;
+auto fatfs_test() -> bool;
 auto memory_test() -> bool;
 auto kernel_task_test() -> bool;
 auto user_task_test() -> bool;
 auto mutex_test() -> bool;
+auto cross_core_test() -> bool;
+auto yield_test() -> bool;
+auto fork_test() -> bool;
+auto signal_test() -> bool;
+auto affinity_test() -> bool;
+auto tick_test() -> bool;
+auto zombie_reap_test() -> bool;
+auto stress_test() -> bool;
 
 // ===========================================================================
 // QEMU exit
@@ -197,19 +208,16 @@ inline void QemuExit([[maybe_unused]] bool success) {
 #if defined(__riscv)
   // sifive_test device (virt machine 默认存在，地址 0x100000)
   // 0x5555 = FINISHER_PASS, 0x3333 = FINISHER_FAIL
-  volatile auto* finisher = reinterpret_cast<volatile uint32_t*>(0x100000);
+  constexpr uint64_t kSifiveTestAddr = 0x100000;
+  constexpr size_t kSifiveTestSize = 0x1000;
+  (void)VirtualMemorySingleton::instance().MapMMIO(kSifiveTestAddr,
+                                                   kSifiveTestSize);
+  volatile auto* finisher =
+      reinterpret_cast<volatile uint32_t*>(kSifiveTestAddr);
   *finisher = success ? 0x5555 : 0x3333;
-#elif defined(__x86_64__)
-  // isa-debug-exit device (需要 QEMU 参数:
-  //   -device isa-debug-exit,iobase=0xf4,iosize=0x04)
-  // QEMU 退出码 = (val << 1) | 1，所以 0 -> 1(pass), 1 -> 3(fail)
-  uint32_t code = success ? 0 : 1;
-  asm volatile("outl %0, %1" ::"a"(code), "Nd"(static_cast<uint16_t>(0xf4)));
 #elif defined(__aarch64__)
-  // PSCI SYSTEM_OFF (function id = 0x84000008)
-  // 需要 EL2/EL3 支持（ATF 已提供）
-  register uint64_t x0 asm("x0") = 0x84000008;
-  asm volatile("hvc #0" : "+r"(x0));
+  // PSCI SYSTEM_OFF，通过 SMC 调用 ATF (EL3)
+  cpu_io::SecureMonitorCall(cpu_io::psci::kSYSTEM_OFF, 0, 0, 0, 0, 0, 0, 0);
 #endif
   __builtin_unreachable();
 }

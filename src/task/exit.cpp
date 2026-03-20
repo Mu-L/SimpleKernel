@@ -16,16 +16,15 @@ auto TaskManager::Exit(int exit_code) -> void {
   assert(current->GetStatus() == TaskStatus::kRunning &&
          "Exit: current task status must be kRunning");
 
+  ResourceId wait_resource_id{};
+  bool should_wake_parent = false;
+
   {
     LockGuard<SpinLock> lock_guard(cpu_sched.lock);
 
-    // 设置退出码
     current->aux->exit_code = exit_code;
-
-    // 检查是否是线程组的主线程
     bool is_group_leader = current->IsThreadGroupLeader();
 
-    // 如果是线程组的主线程，需要检查是否还有其他线程
     if (is_group_leader && current->GetThreadGroupSize() > 1) {
       klog::Warn(
           "Exit: Thread group leader (pid={}, tgid={}) exiting, but group "
@@ -33,43 +32,31 @@ auto TaskManager::Exit(int exit_code) -> void {
           current->pid, current->aux->tgid, current->GetThreadGroupSize());
     }
 
-    // 从线程组中移除
     current->LeaveThreadGroup();
 
-    // 将子进程过继给 init 进程 (仅当是进程时)
+    if (current->aux->parent_pid != 0) {
+      current->fsm.Receive(MsgExit{exit_code, true});
+      wait_resource_id =
+          ResourceId(ResourceType::kChildExit, current->aux->parent_pid);
+      should_wake_parent = true;
+
+      klog::Debug("Exit: pid={} entering zombie, will wake parent={}",
+                  current->pid, current->aux->parent_pid);
+    } else {
+      current->fsm.Receive(MsgExit{exit_code, false});
+    }
+
     if (is_group_leader) {
       ReparentChildren(current);
     }
+  }
 
-    if (current->aux->parent_pid != 0) {
-      // 有父进程，进入僵尸状态等待回收
-      // Transition: kRunning -> kZombie
-      current->fsm.Receive(MsgExit{exit_code, true});
-
-      // 唤醒等待此进程退出的父进程
-      // 父进程会阻塞在 ChildExit 类型的资源上，数据是父进程自己的 PID
-      auto wait_resource_id =
-          ResourceId(ResourceType::kChildExit, current->aux->parent_pid);
-      Wakeup(wait_resource_id);
-
-      /// @todo 通知父进程 (发送 SIGCHLD)
-
-      klog::Debug("Exit: pid={} waking up parent={} on resource={}",
-                  current->pid, current->aux->parent_pid,
-                  wait_resource_id.GetTypeName());
-    } else {
-      // 没有父进程，直接退出并释放资源
-      // Transition: kRunning -> kExited
-      current->fsm.Receive(MsgExit{exit_code, false});
-      // No parent to call wait(), reap immediately to free TCB + stack
-      ReapTask(current);
-    }
+  if (should_wake_parent) {
+    Wakeup(wait_resource_id);
   }
 
   Schedule();
 
-  klog::Err("Exit: Task {} should not return from Schedule()", current->pid);
-
-  // UNREACHABLE: 任务退出后 Schedule() 不应返回
+  // UNREACHABLE
   __builtin_unreachable();
 }

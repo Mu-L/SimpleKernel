@@ -28,7 +28,7 @@ struct test_case {
   bool is_smp_test = false;
 };
 
-constexpr size_t kTestCount = 18;
+constexpr size_t kTestCount = 26;
 
 std::array<test_case, kTestCount> test_cases = {
     test_case{"ctor_dtor_test", ctor_dtor_test, false},
@@ -36,19 +36,28 @@ std::array<test_case, kTestCount> test_cases = {
     test_case{"memory_test", memory_test, false},
     test_case{"virtual_memory_test", virtual_memory_test, false},
     test_case{"interrupt_test", interrupt_test, false},
+    test_case{"kernel_task_test", kernel_task_test, false},
+    test_case{"user_task_test", user_task_test, false},
     test_case{"fifo_scheduler_test", fifo_scheduler_test, false},
     test_case{"rr_scheduler_test", rr_scheduler_test, false},
     test_case{"cfs_scheduler_test", cfs_scheduler_test, false},
     test_case{"idle_scheduler_test", idle_scheduler_test, false},
-    test_case{"thread_group_system_test", thread_group_system_test, false},
-    test_case{"wait_system_test", wait_system_test, false},
-    test_case{"clone_system_test", clone_system_test, false},
-    test_case{"exit_system_test", exit_system_test, false},
-    test_case{"ramfs_system_test", ramfs_system_test, false},
-    test_case{"fatfs_system_test", fatfs_system_test, false},
+    test_case{"thread_group_test", thread_group_test, false},
+    test_case{"wait_test", wait_test, false},
+    test_case{"clone_test", clone_test, false},
+    test_case{"exit_test", exit_test, false},
+    test_case{"cross_core_test", cross_core_test, false},
     test_case{"mutex_test", mutex_test, false},
-    test_case{"kernel_task_test", kernel_task_test, false},
-    test_case{"user_task_test", user_task_test, false}};
+    test_case{"yield_test", yield_test, false},
+    test_case{"fork_test", fork_test, false},
+    test_case{"signal_test", signal_test, false},
+    test_case{"affinity_test", affinity_test, false},
+    test_case{"tick_test", tick_test, false},
+    test_case{"zombie_reap_test", zombie_reap_test, false},
+    test_case{"stress_test", stress_test, false},
+    test_case{"ramfs_test", ramfs_test, false},
+    test_case{"fatfs_test", fatfs_test, false},
+};
 
 std::array<TestResult, kTestCount> test_results{};
 
@@ -137,10 +146,13 @@ void test_runner_entry(void* /*arg*/) {
     task->aux->parent_pid = runner->pid;
     task->aux->pgid = runner->aux->pgid;
 
-    test_results[i].pid = task->pid;
+    // Save raw pointer: pid is assigned inside AddTask() by AllocatePid(),
+    // so we must read it *after* the call (unique_ptr is moved).
+    auto* task_ptr = task.get();
     test_results[i].status = TestThreadStatus::kRunning;
 
     task_mgr.AddTask(std::move(task));
+    test_results[i].pid = task_ptr->pid;
     thread_test_count++;
   }
 
@@ -160,6 +172,7 @@ void test_runner_entry(void* /*arg*/) {
     if (wait_result.has_value() && wait_result.value() > 0) {
       Pid exited_pid = wait_result.value();
 
+      bool is_test_thread = false;
       for (size_t i = 0; i < kTestCount; ++i) {
         if (test_results[i].pid == static_cast<int64_t>(exited_pid)) {
           test_results[i].exit_code = status;
@@ -169,11 +182,17 @@ void test_runner_entry(void* /*arg*/) {
           klog::Info("[RUNNER] Collected: {} (pid={}, exit_code={}) — {}",
                      test_cases[i].name, exited_pid, status,
                      (status == 0) ? "PASS" : "FAIL");
+          is_test_thread = true;
           break;
         }
       }
 
-      collected++;
+      if (is_test_thread) {
+        collected++;
+      } else {
+        klog::Debug("[RUNNER] Reaped orphan pid={}, not a test thread",
+                    exited_pid);
+      }
     } else {
       (void)sys_sleep(50);
       retries++;
@@ -234,8 +253,10 @@ auto main_smp(int argc, const char** argv) -> int {
 
 }  // namespace
 
+std::atomic_flag primary_booted_ = ATOMIC_FLAG_INIT;
+
 auto _start(int argc, const char** argv) -> void {
-  if (argv != nullptr) {
+  if (!primary_booted_.test_and_set(std::memory_order_acquire)) {
     CppInit();
     main(argc, argv);
   } else {

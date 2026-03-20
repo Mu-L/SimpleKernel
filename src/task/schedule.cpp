@@ -23,9 +23,18 @@
 #include "task_messages.hpp"
 #include "virtual_memory.hpp"
 
+extern "C" [[noreturn]] void kernel_thread_bootstrap(void (*entry)(void*),
+                                                     void* arg) {
+  cpu_io::EnableInterrupt();
+  entry(arg);
+  assert(false && "kernel thread returned without calling sys_exit()");
+  while (true) {
+    cpu_io::Pause();
+  }
+}
+
 auto TaskManager::Schedule() -> void {
   auto& cpu_sched = GetCurrentCpuSched();
-  cpu_sched.scheduler_started = true;
   cpu_sched.lock.Lock().or_else([](auto&& err) {
     klog::Err("Schedule: Failed to acquire lock: {}", err.message());
     while (true) {
@@ -33,6 +42,8 @@ auto TaskManager::Schedule() -> void {
     }
     return Expected<void>{};
   });
+
+  cpu_sched.scheduler_started = true;
 
   auto* current = GetCurrentTask();
   assert(current != nullptr && "Schedule: No current task to schedule");

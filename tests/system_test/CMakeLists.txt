@@ -18,14 +18,22 @@ ADD_EXECUTABLE (
     rr_scheduler_test.cpp
     cfs_scheduler_test.cpp
     idle_scheduler_test.cpp
-    thread_group_system_test.cpp
-    wait_system_test.cpp
-    clone_system_test.cpp
-    exit_system_test.cpp
-    ramfs_system_test.cpp
-    fatfs_system_test.cpp
+    thread_group_test.cpp
+    wait_test.cpp
+    clone_test.cpp
+    exit_test.cpp
+    ramfs_test.cpp
+    fatfs_test.cpp
     kernel_task_test.cpp
     user_task_test.cpp
+    cross_core_test.cpp
+    yield_test.cpp
+    fork_test.cpp
+    signal_test.cpp
+    affinity_test.cpp
+    tick_test.cpp
+    zombie_reap_test.cpp
+    stress_test.cpp
     ${CMAKE_SOURCE_DIR}/src/syscall.cpp
     ${CMAKE_SOURCE_DIR}/src/io_buffer.cpp)
 
@@ -49,17 +57,7 @@ TARGET_LINK_LIBRARIES (
 LIST (APPEND ${PROJECT_NAME}_QEMU_BOOT_FLAGS
       "-D;${CMAKE_BINARY_DIR}/bin/${PROJECT_NAME}_qemu.log")
 # 目标平台参数
-IF(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-    LIST (
-        APPEND
-        ${PROJECT_NAME}_QEMU_BOOT_FLAGS
-        -drive
-        file=fat:rw:${CMAKE_BINARY_DIR}/bin,format=raw,media=disk
-        -bios
-        ${u-boot_BINARY_DIR}/u-boot.rom
-        -device
-        isa-debug-exit,iobase=0xf4,iosize=0x04)
-ELSEIF(CMAKE_SYSTEM_PROCESSOR STREQUAL "riscv64")
+IF(CMAKE_SYSTEM_PROCESSOR STREQUAL "riscv64")
     LIST (APPEND ${PROJECT_NAME}_QEMU_BOOT_FLAGS -bios
           ${u-boot_BINARY_DIR}/spl/u-boot-spl.bin -device
           loader,file=${u-boot_BINARY_DIR}/u-boot.itb,addr=0x80200000)
